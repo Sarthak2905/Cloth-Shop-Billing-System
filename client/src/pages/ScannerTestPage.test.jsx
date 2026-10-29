@@ -52,3 +52,10 @@ test('the keyboard scan simulator finds the selected item', async () => {
 
     expect(await screen.findByText('Item found')).toBeInTheDocument()
 })
+
+test('starting the camera without camera support explains why', async () => {
+    renderPage()
+    fireEvent.click(screen.getByRole('button', { name: 'Start camera' }))
+
+    expect(await screen.findByText(/needs HTTPS or localhost/)).toBeInTheDocument()
+})

@@ -5,16 +5,22 @@ import { lookupBarcode } from '../scanner/scanService'
 import { useBarcodeScanner } from '../scanner/useBarcodeScanner'
 import { simulateKeyboardScan } from '../scanner/simulateScan'
 import ScanResultCard from '../components/ScanResultCard'
+import CameraScanner from '../components/CameraScanner'
 import FormField from '../components/FormField'
 import { inputClass, primaryButton, secondaryButton } from '../components/styles'
 
-const SOURCE_LABEL = { manual: 'Typed', keyboard: 'Keyboard scan' }
+const SOURCE_LABEL = {
+    manual: 'Typed',
+    keyboard: 'Keyboard scan',
+    camera: 'Camera scan',
+}
 
 export default function ScannerTestPage() {
     const [manual, setManual] = useState('')
     const [result, setResult] = useState(null)
     const [log, setLog] = useState([])
     const [selected, setSelected] = useState('')
+    const [cameraOn, setCameraOn] = useState(false)
     const inputRef = useRef(null)
     const nextLogId = useRef(0)
 
@@ -49,8 +55,8 @@ export default function ScannerTestPage() {
         <div className="space-y-4">
             <h2 className="text-xl font-bold">Scanner test</h2>
             <p className="text-sm text-slate-600">
-                Test barcode lookup without a scanner. Type a barcode, or use the simulator below.
-                A real keyboard-style scanner will also work here when no text box has focus.
+                Test barcode lookup without a scanner. Type a barcode, use the simulator, or turn on
+                the camera. A real keyboard-style scanner also works when no text box has focus.
             </p>
 
             <form onSubmit={handleManualSubmit} className="space-y-3 rounded-xl bg-white p-4 shadow-sm">
@@ -103,6 +109,17 @@ export default function ScannerTestPage() {
                         Scan unknown barcode
                     </button>
                 </div>
+            </div>
+
+            <div className="space-y-3 rounded-xl bg-white p-4 shadow-sm">
+                <button
+                    type="button"
+                    className={cameraOn ? secondaryButton : primaryButton}
+                    onClick={() => setCameraOn((on) => !on)}
+                >
+                    {cameraOn ? 'Stop camera' : 'Start camera'}
+                </button>
+                <CameraScanner active={cameraOn} onScan={(code) => handleScan(code, 'camera')} />
             </div>
 
             <ScanResultCard result={result} />
