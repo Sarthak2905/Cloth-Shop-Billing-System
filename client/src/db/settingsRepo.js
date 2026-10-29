@@ -7,6 +7,7 @@ export const DEFAULT_SETTINGS = {
   phone: '',
   invoicePrefix: 'INV',
   allowNegativeStock: false,
+  roundToRupee: true,
 }
 
 export async function getSettings() {

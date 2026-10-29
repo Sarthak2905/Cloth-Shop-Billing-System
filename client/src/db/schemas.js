@@ -52,6 +52,7 @@ export const settingsSchema = z.object({
     .trim()
     .regex(/^[A-Z0-9]{1,6}$/, 'Use 1-6 capital letters or digits'),
   allowNegativeStock: z.boolean(),
+  roundToRupee: z.boolean(),
 })
 
 // Runs a schema and converts failures into our AppError.

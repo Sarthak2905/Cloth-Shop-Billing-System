@@ -10,7 +10,13 @@ export default function Layout() {
             <header className="bg-white shadow-sm">
                 <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3">
                     <h1 className="text-lg font-bold">Clothing POS</h1>
-                    <nav className="flex gap-2">
+                    <nav className="flex flex-wrap justify-end gap-2">
+                        <NavLink to="/billing" className={linkClass}>
+                            Billing
+                        </NavLink>
+                        <NavLink to="/sales" className={linkClass}>
+                            Sales
+                        </NavLink>
                         <NavLink to="/products" className={linkClass}>
                             Products
                         </NavLink>

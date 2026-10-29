@@ -1,5 +1,8 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import Layout from './components/Layout'
+import BillingPage from './pages/BillingPage'
+import SalesPage from './pages/SalesPage'
+import SaleDetailPage from './pages/SaleDetailPage'
 import ProductsPage from './pages/ProductsPage'
 import NewProductPage from './pages/NewProductPage'
 import ProductDetailPage from './pages/ProductDetailPage'
@@ -10,6 +13,9 @@ export default function App() {
     <Routes>
       <Route element={<Layout />}>
         <Route index element={<Navigate to="/products" replace />} />
+        <Route path="/billing" element={<BillingPage />} />
+        <Route path="/sales" element={<SalesPage />} />
+        <Route path="/sales/:id" element={<SaleDetailPage />} />
         <Route path="/products" element={<ProductsPage />} />
         <Route path="/products/new" element={<NewProductPage />} />
         <Route path="/products/:id" element={<ProductDetailPage />} />
