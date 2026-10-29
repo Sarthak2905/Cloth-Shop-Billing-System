@@ -1,21 +1,21 @@
-import { useEffect, useState } from 'react'
+import { Navigate, Route, Routes } from 'react-router-dom'
+import Layout from './components/Layout'
+import ProductsPage from './pages/ProductsPage'
+import NewProductPage from './pages/NewProductPage'
+import ProductDetailPage from './pages/ProductDetailPage'
+import ScannerTestPage from './pages/ScannerTestPage'
 
 export default function App() {
-  const [apiStatus, setApiStatus] = useState('checking...')
-
-  useEffect(() => {
-    fetch('http://localhost:5000/api/health')
-      .then((res) => res.json())
-      .then((data) => setApiStatus(data.status))
-      .catch(() => setApiStatus('server not reachable'))
-  }, [])
-
   return (
-    <div className="min-h-screen bg-slate-100 flex items-center justify-center">
-      <div className="bg-white rounded-xl shadow p-6 text-center">
-        <h1 className="text-2xl font-bold">Clothing POS</h1>
-        <p className="mt-2 text-slate-600">API status: {apiStatus}</p>
-      </div>
-    </div>
+    <Routes>
+      <Route element={<Layout />}>
+        <Route index element={<Navigate to="/products" replace />} />
+        <Route path="/products" element={<ProductsPage />} />
+        <Route path="/products/new" element={<NewProductPage />} />
+        <Route path="/products/:id" element={<ProductDetailPage />} />
+        <Route path="/scanner" element={<ScannerTestPage />} />
+        <Route path="*" element={<p>Page not found</p>} />
+      </Route>
+    </Routes>
   )
 }

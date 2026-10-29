@@ -7,7 +7,7 @@ export const db = new Dexie('clothing_pos')
 // "&" = unique. "[a+b+c]" = compound index.
 db.version(1).stores({
   products: 'id, name, category, brand, status, updatedAt',
-  variants: 'id, productId, &barcode, &sku, status, &[productId+size+colour]',
+  variants: 'id, productId, &barcode, &sku, status, &[productId+size]',
   sales: 'id, &invoiceNumber, createdAt, status, syncStatus',
   saleItems: 'id, saleId, variantId',
   stockMovements: 'id, variantId, type, createdAt, referenceId',

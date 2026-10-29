@@ -19,7 +19,6 @@ const variantFields = {
     .max(48)
     .regex(/^[A-Za-z0-9\-_.]+$/, 'Barcode has invalid characters'),
   size: text(20),
-  colour: text(30),
   costPaise: z.number().int().nonnegative(),
   mrpPaise: z.number().int().nonnegative(),
   sellingPricePaise: z.number().int().nonnegative(),

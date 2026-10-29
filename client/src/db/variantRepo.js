@@ -47,14 +47,14 @@ export async function createVariant(input) {
             `SKU "${fields.sku}" is already used`,
           )
         }
-        const sameSizeColour = await db.variants
-          .where('[productId+size+colour]')
-          .equals([fields.productId, fields.size, fields.colour])
+        const sameSize = await db.variants
+          .where('[productId+size]')
+          .equals([fields.productId, fields.size])
           .first()
-        if (sameSizeColour) {
+        if (sameSize) {
           throw new AppError(
             'DUPLICATE_VARIANT',
-            `This product already has ${fields.size} / ${fields.colour}`,
+            `This product already has size ${fields.size}`,
           )
         }
 
@@ -114,7 +114,7 @@ export async function updateVariant(id, changes) {
     if (err.name === 'ConstraintError') {
       throw new AppError(
         'DUPLICATE_BARCODE',
-        'Barcode, SKU, or size/colour already exists',
+        'Barcode, SKU or size already exists',
       )
     }
     throw err
@@ -183,4 +183,23 @@ export async function adjustStock({
       return newStock
     },
   )
+}
+
+const BARCODE_PREFIX = 'CLO'
+
+// Creates the next unused internal barcode, e.g. CLO000001.
+// This is an internal code for your own shop, not a GS1 EAN.
+// Gaps in the numbers are fine (pressing Generate without saving uses a number).
+export async function generateBarcode() {
+  return db.transaction('rw', db.settings, db.variants, async () => {
+    const row = await db.settings.get('barcodeCounter')
+    let counter = row?.value ?? 0
+    let code
+    do {
+      counter += 1
+      code = `${BARCODE_PREFIX}${String(counter).padStart(6, '0')}`
+    } while (await db.variants.where('barcode').equals(code).first())
+    await db.settings.put({ key: 'barcodeCounter', value: counter })
+    return code
+  })
 }

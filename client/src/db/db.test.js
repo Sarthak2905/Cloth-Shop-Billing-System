@@ -23,7 +23,6 @@ const variantInput = (productId, over = {}) => ({
   sku: 'SHIRT-BLU-M',
   barcode: 'CLO000001',
   size: 'M',
-  colour: 'Blue',
   costPaise: 30000,
   mrpPaise: 79900,
   sellingPricePaise: 69900,
