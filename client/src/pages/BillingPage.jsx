@@ -1,3 +1,4 @@
+import { isStorageFull } from '../lib/storageErrors'
 import { useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
@@ -123,6 +124,9 @@ export default function BillingPage() {
         } catch (err) {
             if (err instanceof AppError) return err.message
             console.error(err)
+            if (isStorageFull(err)) {
+                return 'This device is out of storage space. Free up space and try again. Nothing was saved.'
+            }
             return 'Could not save the sale. Nothing was charged. Please try again.'
         }
     }

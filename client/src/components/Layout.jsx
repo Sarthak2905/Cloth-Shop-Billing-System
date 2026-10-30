@@ -1,4 +1,5 @@
 import { NavLink, Outlet } from 'react-router-dom'
+import StatusBar from './StatusBar'
 
 const linkClass = ({ isActive }) =>
     `rounded-lg px-3 py-1 text-sm font-medium ${isActive ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-slate-200'
@@ -26,12 +27,16 @@ export default function Layout() {
                         <NavLink to="/settings" className={linkClass}>
                             Settings
                         </NavLink>
+                        <NavLink to="/storage" className={linkClass}>
+                            Storage
+                        </NavLink>
                         <NavLink to="/scanner" className={linkClass}>
                             Scanner Test
                         </NavLink>
                     </nav>
                 </div>
             </header>
+            <StatusBar />
             <main className="mx-auto max-w-3xl p-4 print:max-w-none print:p-0">
                 <Outlet />
             </main>
