@@ -6,8 +6,8 @@ const linkClass = ({ isActive }) =>
 
 export default function Layout() {
     return (
-        <div className="min-h-screen bg-slate-100">
-            <header className="bg-white shadow-sm">
+        <div className="min-h-screen bg-slate-100 print:bg-white">
+            <header className="bg-white shadow-sm print:hidden">
                 <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3">
                     <h1 className="text-lg font-bold">Clothing POS</h1>
                     <nav className="flex flex-wrap justify-end gap-2">
@@ -20,13 +20,19 @@ export default function Layout() {
                         <NavLink to="/products" className={linkClass}>
                             Products
                         </NavLink>
+                        <NavLink to="/labels" className={linkClass}>
+                            Labels
+                        </NavLink>
+                        <NavLink to="/settings" className={linkClass}>
+                            Settings
+                        </NavLink>
                         <NavLink to="/scanner" className={linkClass}>
                             Scanner Test
                         </NavLink>
                     </nav>
                 </div>
             </header>
-            <main className="mx-auto max-w-3xl p-4">
+            <main className="mx-auto max-w-3xl p-4 print:max-w-none print:p-0">
                 <Outlet />
             </main>
         </div>

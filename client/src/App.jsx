@@ -6,6 +6,8 @@ import SaleDetailPage from './pages/SaleDetailPage'
 import ProductsPage from './pages/ProductsPage'
 import NewProductPage from './pages/NewProductPage'
 import ProductDetailPage from './pages/ProductDetailPage'
+import LabelsPage from './pages/LabelsPage'
+import SettingsPage from './pages/SettingsPage'
 import ScannerTestPage from './pages/ScannerTestPage'
 
 export default function App() {
@@ -19,6 +21,8 @@ export default function App() {
         <Route path="/products" element={<ProductsPage />} />
         <Route path="/products/new" element={<NewProductPage />} />
         <Route path="/products/:id" element={<ProductDetailPage />} />
+        <Route path="/labels" element={<LabelsPage />} />
+        <Route path="/settings" element={<SettingsPage />} />
         <Route path="/scanner" element={<ScannerTestPage />} />
         <Route path="*" element={<p>Page not found</p>} />
       </Route>

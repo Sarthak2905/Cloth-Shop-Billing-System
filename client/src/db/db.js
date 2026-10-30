@@ -14,3 +14,8 @@ db.version(1).stores({
   settings: 'key',
   syncQueue: 'id, status, createdAt',
 })
+
+// Version 2: adds the print job log. Version 1 above is never edited.
+db.version(2).stores({
+  printJobs: 'id, saleId, status, createdAt',
+})

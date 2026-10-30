@@ -5,7 +5,10 @@ export const DEFAULT_SETTINGS = {
   shopName: 'My Clothing Store',
   address: '',
   phone: '',
+  taxId: '',
   invoicePrefix: 'INV',
+  receiptFooter: '',
+  receiptPaperWidth: '58',
   allowNegativeStock: false,
   roundToRupee: true,
 }

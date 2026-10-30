@@ -95,6 +95,8 @@ export async function createSale({ id, cart, payment }) {
           name: settings.shopName,
           address: settings.address,
           phone: settings.phone,
+          taxId: settings.taxId,
+          footer: settings.receiptFooter,
         },
         itemCount: totals.itemCount,
         subtotalPaise: totals.subtotalPaise,

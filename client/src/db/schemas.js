@@ -47,10 +47,13 @@ export const settingsSchema = z.object({
   shopName: text(80),
   address: z.string().trim().max(200),
   phone: z.string().trim().max(20),
+  taxId: z.string().trim().max(20),
   invoicePrefix: z
     .string()
     .trim()
     .regex(/^[A-Z0-9]{1,6}$/, 'Use 1-6 capital letters or digits'),
+  receiptFooter: z.string().trim().max(120),
+  receiptPaperWidth: z.enum(['58', '80']),
   allowNegativeStock: z.boolean(),
   roundToRupee: z.boolean(),
 })
