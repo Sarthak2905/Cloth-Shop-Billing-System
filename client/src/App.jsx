@@ -8,6 +8,7 @@ import NewProductPage from './pages/NewProductPage'
 import ProductDetailPage from './pages/ProductDetailPage'
 import LabelsPage from './pages/LabelsPage'
 import SettingsPage from './pages/SettingsPage'
+import BackupPage from './pages/BackupPage'
 import StoragePage from './pages/StoragePage'
 import ScannerTestPage from './pages/ScannerTestPage'
 
@@ -24,6 +25,7 @@ export default function App() {
         <Route path="/products/:id" element={<ProductDetailPage />} />
         <Route path="/labels" element={<LabelsPage />} />
         <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/backup" element={<BackupPage />} />
         <Route path="/storage" element={<StoragePage />} />
         <Route path="/scanner" element={<ScannerTestPage />} />
         <Route path="*" element={<p>Page not found</p>} />

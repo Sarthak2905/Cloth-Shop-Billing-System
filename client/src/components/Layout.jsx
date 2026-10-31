@@ -1,4 +1,5 @@
 import { NavLink, Outlet } from 'react-router-dom'
+import BackupReminder from './BackupReminder'
 import StatusBar from './StatusBar'
 
 const linkClass = ({ isActive }) =>
@@ -27,6 +28,9 @@ export default function Layout() {
                         <NavLink to="/settings" className={linkClass}>
                             Settings
                         </NavLink>
+                        <NavLink to="/backup" className={linkClass}>
+                            Backup
+                        </NavLink>
                         <NavLink to="/storage" className={linkClass}>
                             Storage
                         </NavLink>
@@ -37,6 +41,7 @@ export default function Layout() {
                 </div>
             </header>
             <StatusBar />
+            <BackupReminder />
             <main className="mx-auto max-w-3xl p-4 print:max-w-none print:p-0">
                 <Outlet />
             </main>
