@@ -5,6 +5,8 @@ import "./Settings.js";
 import "./Product.js";
 import "./Variant.js";
 import "./StockMovement.js";
+import "./Counter.js";
+import "./Sale.js";
 
 // Builds every unique index up front, so duplicates are refused from the first request.
 export async function initModels() {

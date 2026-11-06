@@ -7,6 +7,7 @@ import { createLimiter } from "./http/rateLimiter.js";
 import { authRouter } from "./routes/auth.js";
 import { healthRouter } from "./routes/health.js";
 import { productsRouter } from "./routes/products.js";
+import { salesRouter } from "./routes/sales.js";
 import { settingsRouter } from "./routes/settings.js";
 import { usersRouter } from "./routes/users.js";
 import { variantsRouter } from "./routes/variants.js";
@@ -46,6 +47,7 @@ export function createApp(config) {
   app.use("/api/settings", settingsRouter(config));
   app.use("/api/products", productsRouter(config));
   app.use("/api/variants", variantsRouter(config));
+  app.use("/api/sales", salesRouter(config));
 
   app.use(notFoundHandler);
   app.use(errorHandler(console));
