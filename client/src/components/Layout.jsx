@@ -1,12 +1,14 @@
 import { NavLink, Outlet } from 'react-router-dom'
+import SyncProvider from '../sync/SyncProvider'
 import BackupReminder from './BackupReminder'
 import StatusBar from './StatusBar'
+import SyncBadge from './SyncBadge'
 
 const linkClass = ({ isActive }) =>
     `rounded-lg px-3 py-1 text-sm font-medium ${isActive ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-slate-200'
     }`
 
-export default function Layout() {
+function LayoutBody() {
     return (
         <div className="min-h-screen bg-slate-100 print:bg-white">
             <header className="bg-white shadow-sm print:hidden">
@@ -28,6 +30,9 @@ export default function Layout() {
                         <NavLink to="/settings" className={linkClass}>
                             Settings
                         </NavLink>
+                        <NavLink to="/sync" className={linkClass}>
+                            Sync
+                        </NavLink>
                         <NavLink to="/backup" className={linkClass}>
                             Backup
                         </NavLink>
@@ -42,9 +47,20 @@ export default function Layout() {
             </header>
             <StatusBar />
             <BackupReminder />
+            <div className="mx-auto max-w-3xl px-4 pt-2 print:hidden">
+                <SyncBadge />
+            </div>
             <main className="mx-auto max-w-3xl p-4 print:max-w-none print:p-0">
                 <Outlet />
             </main>
         </div>
+    )
+}
+
+export default function Layout() {
+    return (
+        <SyncProvider>
+            <LayoutBody />
+        </SyncProvider>
     )
 }

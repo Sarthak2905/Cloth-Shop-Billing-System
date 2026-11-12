@@ -24,6 +24,9 @@ const movementSchema = new mongoose.Schema(
     reason: { type: String, default: "", trim: true, maxlength: 200 },
     referenceId: { type: String, default: null, index: true },
     userId: { type: String, default: null },
+    // When it really happened. For a change synced from a device this is the device's
+    // time. createdAt is always the time the server recorded it.
+    occurredAt: { type: Date, default: Date.now },
   },
   { timestamps: { createdAt: true, updatedAt: false } },
 );
@@ -43,6 +46,7 @@ export function publicMovement(movement) {
     reason: movement.reason,
     referenceId: movement.referenceId,
     userId: movement.userId,
+    occurredAt: movement.occurredAt,
     createdAt: movement.createdAt,
   };
 }

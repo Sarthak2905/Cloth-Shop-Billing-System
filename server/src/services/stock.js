@@ -7,6 +7,9 @@ import { Variant } from "../models/Variant.js";
 //
 // For a removal, the update itself says "only if enough stock is there". That makes
 // it safe when many requests arrive at the same moment: they cannot oversell.
+//
+// `movementId` and `occurredAt` are used when a device syncs a change it made earlier:
+// the movement keeps the device's id (so it can never be applied twice) and its time.
 export async function applyStockChange({
   variantId,
   quantityChange,
@@ -15,6 +18,8 @@ export async function applyStockChange({
   referenceId = null,
   userId = null,
   allowNegative = false,
+  movementId = null,
+  occurredAt = null,
   session,
 }) {
   if (!Number.isInteger(quantityChange) || quantityChange === 0) {
@@ -55,6 +60,7 @@ export async function applyStockChange({
   const [movement] = await StockMovement.create(
     [
       {
+        ...(movementId ? { _id: movementId } : {}),
         variantId,
         type,
         quantityChange,
@@ -62,6 +68,7 @@ export async function applyStockChange({
         reason,
         referenceId,
         userId,
+        occurredAt: occurredAt ?? new Date(),
       },
     ],
     { session },
