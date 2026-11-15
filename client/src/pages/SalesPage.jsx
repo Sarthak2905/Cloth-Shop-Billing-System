@@ -19,23 +19,35 @@ export default function SalesPage() {
             )}
 
             <ul className="space-y-2">
-                {sales?.map((sale) => (
-                    <li key={sale.id}>
-                        <Link
-                            to={`/sales/${sale.id}`}
-                            className="block rounded-xl bg-white p-4 shadow-sm hover:shadow"
-                        >
-                            <div className="flex justify-between gap-2">
-                                <p className="font-semibold">{sale.invoiceNumber}</p>
-                                <p className="font-semibold">{formatINR(sale.totalPaise)}</p>
-                            </div>
-                            <p className="text-sm text-slate-500">
-                                {formatDateTime(sale.createdAt)} · {sale.itemCount} items ·{' '}
-                                {PAYMENT_LABEL[sale.payment.method]}
-                            </p>
-                        </Link>
-                    </li>
-                ))}
+                {sales?.map((sale) => {
+                    const cancelled = sale.status === 'cancelled'
+                    return (
+                        <li key={sale.id}>
+                            <Link
+                                to={`/sales/${sale.id}`}
+                                className="block rounded-xl bg-white p-4 shadow-sm hover:shadow"
+                            >
+                                <div className="flex justify-between gap-2">
+                                    <p className="font-semibold">
+                                        {sale.invoiceNumber}
+                                        {cancelled && (
+                                            <span className="ml-2 rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">
+                                                Cancelled
+                                            </span>
+                                        )}
+                                    </p>
+                                    <p className={`font-semibold ${cancelled ? 'text-slate-400 line-through' : ''}`}>
+                                        {formatINR(sale.totalPaise)}
+                                    </p>
+                                </div>
+                                <p className="text-sm text-slate-500">
+                                    {formatDateTime(sale.createdAt)} · {sale.itemCount} items ·{' '}
+                                    {PAYMENT_LABEL[sale.payment.method]}
+                                </p>
+                            </Link>
+                        </li>
+                    )
+                })}
             </ul>
         </div>
     )

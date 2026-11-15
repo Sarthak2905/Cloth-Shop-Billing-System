@@ -1,8 +1,8 @@
 import { formatINR } from '../lib/money'
 
-function Row({ label, value, strong }) {
+function Row({ label, value }) {
     return (
-        <div className={`flex justify-between ${strong ? 'text-lg font-bold' : 'text-sm text-slate-700'}`}>
+        <div className="flex justify-between text-sm text-slate-700">
             <dt>{label}</dt>
             <dd>{value}</dd>
         </div>
@@ -10,6 +10,13 @@ function Row({ label, value, strong }) {
 }
 
 export default function BillTotals({ totals }) {
+    // Only on a live bill: the part of it that can take a bill discount.
+    const discountable = totals.eligibleBasePaise
+    const partial =
+        totals.billDiscountPaise > 0 &&
+        discountable !== undefined &&
+        discountable < totals.subtotalPaise - totals.itemDiscountPaise
+
     return (
         <div className="space-y-1 rounded-xl bg-white p-4 shadow-sm">
             <dl className="space-y-1">
@@ -33,6 +40,11 @@ export default function BillTotals({ totals }) {
                     </div>
                 </div>
             </dl>
+            {partial && (
+                <p className="text-xs text-slate-500">
+                    The bill discount applies to {formatINR(discountable)} of items that allow discounts.
+                </p>
+            )}
             {totals.taxIncludedPaise > 0 && (
                 <p className="text-xs text-slate-500">
                     Includes tax of {formatINR(totals.taxIncludedPaise)}

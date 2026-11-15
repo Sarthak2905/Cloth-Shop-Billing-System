@@ -12,6 +12,7 @@ import SyncPage from './pages/SyncPage'
 import BackupPage from './pages/BackupPage'
 import StoragePage from './pages/StoragePage'
 import ScannerTestPage from './pages/ScannerTestPage'
+import ImportPage from './pages/ImportPage'
 
 export default function App() {
   return (
@@ -31,6 +32,7 @@ export default function App() {
         <Route path="/storage" element={<StoragePage />} />
         <Route path="/scanner" element={<ScannerTestPage />} />
         <Route path="*" element={<p>Page not found</p>} />
+        <Route path="/import" element={<ImportPage />} />
       </Route>
     </Routes>
   )

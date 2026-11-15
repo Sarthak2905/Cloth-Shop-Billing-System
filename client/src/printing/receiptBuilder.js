@@ -3,10 +3,12 @@ import { paiseToRupees } from '../lib/money.js'
 import { centerText, divider, twoColumns, wrapText } from './textLayout.js'
 
 // Characters per line for each paper width (typical Font A on thermal printers).
-export const PAPER_COLUMNS = { 58: 32, 80: 48 }
+// '80-42' is 80 mm paper with 42 characters per line, which is what the Epson TM-T88III/IV
+// prints in its normal font. '80' (48 characters) suits newer printers such as the TM-T88V.
+export const PAPER_COLUMNS = { '58': 32, '80': 48, '80-42': 42 }
 
 // The Marathi wording is a first draft. Please have it checked by someone fluent.
-const LABELS = {
+export const LABELS = {
   en: {
     invoice: 'Invoice',
     date: 'Date',
@@ -25,6 +27,7 @@ const LABELS = {
     includesTax: 'Includes tax',
     duplicate: '*** DUPLICATE COPY ***',
     phone: 'Ph',
+    gst: 'GST',
     taxId: 'GSTIN',
     thanks: 'Thank you! Visit again.',
     methods: { cash: 'Cash', upi: 'UPI', card: 'Card' },
@@ -47,6 +50,7 @@ const LABELS = {
     includesTax: 'एकूणात कर',
     duplicate: '*** दुय्यम प्रत ***',
     phone: 'फोन',
+    gst: 'जीएसटी',
     taxId: 'GSTIN',
     thanks: 'धन्यवाद! पुन्हा भेट द्या.',
     methods: { cash: 'रोख', upi: 'UPI', card: 'कार्ड' },

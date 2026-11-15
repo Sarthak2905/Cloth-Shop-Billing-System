@@ -47,9 +47,11 @@ test('the sale detail page shows the item and the payment', async () => {
     const { sale, product } = await saveOneSale()
     renderDetail(sale.id)
 
-    expect(await screen.findByText(sale.invoiceNumber)).toBeInTheDocument()
+    expect(
+        await screen.findAllByText(sale.invoiceNumber)
+    ).toHaveLength(2)
     expect(screen.getByText(product.name)).toBeInTheDocument()
-    expect(screen.getByText('Cash')).toBeInTheDocument()
+    expect(screen.getAllByText('Cash')).toHaveLength(2)
 })
 
 test('the receipt preview shows the invoice number and the total', async () => {
@@ -79,8 +81,8 @@ test('a printer problem shows an error and keeps the sale', async () => {
     const { sale } = await saveOneSale()
     renderDetail(sale.id)
 
-    fireEvent.change(await screen.findByLabelText('Simulated printer'), {
-        target: { value: 'paper_out' },
+    fireEvent.change(await screen.findByLabelText('Printer'), {
+        target: { value: 'simulated:paper_out' },
     })
     fireEvent.click(screen.getByRole('button', { name: 'Print receipt' }))
 

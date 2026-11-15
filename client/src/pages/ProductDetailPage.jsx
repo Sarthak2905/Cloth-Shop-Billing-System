@@ -71,7 +71,14 @@ export default function ProductDetailPage() {
                 ) : (
                     <div className="flex items-start justify-between gap-2">
                         <div>
-                            <h2 className="text-xl font-bold">{product.name}</h2>
+                                <h2 className="text-xl font-bold">
+                                    {product.name}
+                                    {product.discountAllowed === false && (
+                                        <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 align-middle text-xs font-medium text-amber-800">
+                                            No discount
+                                        </span>
+                                    )}
+                                </h2>
                             <p className="text-sm text-slate-500">
                                 {[product.brand, product.category].filter(Boolean).join(' · ')}
                             </p>

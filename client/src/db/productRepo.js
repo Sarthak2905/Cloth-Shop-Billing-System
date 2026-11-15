@@ -7,6 +7,7 @@ export async function createProduct(input) {
   const data = validate(productInputSchema, {
     brand: '',
     supplier: '',
+    discountAllowed: true,
     ...input,
   })
   const now = new Date().toISOString()

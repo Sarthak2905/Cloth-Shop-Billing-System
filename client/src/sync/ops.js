@@ -27,6 +27,7 @@ export function productOp(product) {
       brand: product.brand ?? '',
       supplier: product.supplier ?? '',
       status: product.status,
+      discountAllowed: product.discountAllowed !== false,
     },
     kind: 'product',
     entityId: product.id,
@@ -101,7 +102,8 @@ const discountOf = (discount) => ({
 })
 
 // The server recalculates every total itself. Only what the customer saw (the unit
-// prices and discounts) and the total the device calculated (to compare) are sent.
+// prices and discounts), which items had discounts switched off, and the total the
+// device calculated (to compare) are sent.
 export function saleOp(sale, items) {
   const lines = [...items]
     .sort((a, b) => a.lineNumber - b.lineNumber)
@@ -110,6 +112,7 @@ export function saleOp(sale, items) {
       quantity: item.quantity,
       unitPricePaise: item.unitPricePaise,
       ...(item.discount ? { discount: discountOf(item.discount) } : {}),
+      ...(item.discountExcluded ? { noDiscount: true } : {}),
     }))
 
   const payment = { method: sale.payment.method }

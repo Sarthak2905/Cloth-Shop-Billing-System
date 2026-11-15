@@ -9,6 +9,10 @@ export const DEFAULT_SETTINGS = {
   invoicePrefix: 'INV',
   receiptFooter: '',
   receiptPaperWidth: '58',
+  receiptPrinter: 'simulated:ok',
+  receiptTextSize: 'large',
+  receiptLanguage: 'en',
+  autoPrintReceipt: false,
   allowNegativeStock: false,
   roundToRupee: true,
 }

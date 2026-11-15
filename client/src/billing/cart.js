@@ -1,4 +1,4 @@
-import { calculateTotals } from './calc.js'
+import { calculateTotals, isDiscountEligible } from './calc.js'
 
 // A cart is plain data: { lines: [...], billDiscount: null | {type, value} }.
 // Every function returns { cart, error }. If error is set, the cart is unchanged.
@@ -23,6 +23,10 @@ export function lineFromVariant(variant, product) {
     taxRatePercent: variant.taxRatePercent ?? 0,
     priceIncludesTax: variant.priceIncludesTax ?? true,
     availableStock: variant.currentStock,
+    // false for products that never take a discount (older products count as allowed)
+    discountAllowed: product.discountAllowed !== false,
+    // true when the cashier switched discounts off for this item on this bill
+    discountExcluded: false,
     quantity: 1,
     discount: null,
   }
@@ -118,6 +122,15 @@ export function setLineDiscount(cart, variantId, discount) {
 
   const checked = checkDiscount(discount)
   if (checked.error) return fail(cart, checked.error)
+
+  if (checked.discount && !isDiscountEligible(line)) {
+    return fail(
+      cart,
+      line.discountAllowed === false
+        ? 'This product does not allow discounts'
+        : 'Discount is switched off for this item',
+    )
+  }
   if (checked.discount?.type === 'amount') {
     const lineTotal = line.unitPricePaise * line.quantity
     if (checked.discount.value > lineTotal) {
@@ -127,15 +140,39 @@ export function setLineDiscount(cart, variantId, discount) {
   return ok(updateLine(cart, variantId, { discount: checked.discount }))
 }
 
+// Switches discounts off (or back on) for ONE item on this bill. Switching off also
+// removes any discount already given on that item.
+export function setLineDiscountExcluded(cart, variantId, excluded) {
+  const line = cart.lines.find((l) => l.variantId === variantId)
+  if (!line) return fail(cart, 'Item is not in the bill')
+
+  if (!excluded && line.discountAllowed === false) {
+    return fail(cart, 'This product does not allow discounts')
+  }
+  return ok(
+    updateLine(
+      cart,
+      variantId,
+      excluded
+        ? { discountExcluded: true, discount: null }
+        : { discountExcluded: false },
+    ),
+  )
+}
+
 export function setBillDiscount(cart, discount) {
   const checked = checkDiscount(discount)
   if (checked.error) return fail(cart, checked.error)
 
-  if (checked.discount?.type === 'amount') {
-    const withoutBillDiscount = calculateTotals({ ...cart, billDiscount: null })
-    const available =
-      withoutBillDiscount.subtotalPaise - withoutBillDiscount.itemDiscountPaise
-    if (checked.discount.value > available) {
+  if (checked.discount) {
+    const before = calculateTotals({ ...cart, billDiscount: null })
+    if (before.eligibleBasePaise === 0) {
+      return fail(cart, 'No item on this bill can take a discount')
+    }
+    if (
+      checked.discount.type === 'amount' &&
+      checked.discount.value > before.eligibleBasePaise
+    ) {
       return fail(cart, 'Discount cannot be more than the bill total')
     }
   }

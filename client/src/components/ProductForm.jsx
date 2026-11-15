@@ -14,6 +14,8 @@ export default function ProductForm({
         category: initial?.category ?? '',
         brand: initial?.brand ?? '',
         supplier: initial?.supplier ?? '',
+        // older products have no setting, and count as "allowed"
+        discountAllowed: initial?.discountAllowed !== false,
     })
     const [errors, setErrors] = useState({})
     const [saving, setSaving] = useState(false)
@@ -50,6 +52,20 @@ export default function ProductForm({
             <FormField label="Supplier (optional)" htmlFor="p-supplier" error={errors.supplier}>
                 <input id="p-supplier" className={inputClass} value={values.supplier} onChange={set('supplier')} />
             </FormField>
+
+            <label className="flex items-center gap-2 text-sm text-slate-700">
+                <input
+                    type="checkbox"
+                    checked={values.discountAllowed}
+                    onChange={(e) => setValues((v) => ({ ...v, discountAllowed: e.target.checked }))}
+                />
+                Allow discounts on this product
+            </label>
+            {!values.discountAllowed && (
+                <p className="text-xs text-amber-700">
+                    This product will never be included in a bill discount, such as the 10% button.
+                </p>
+            )}
 
             {errors._form && <p className="text-sm text-red-600">{errors._form}</p>}
 

@@ -4,22 +4,19 @@ import { getSettings } from '../db/settingsRepo.js'
 import { AppError } from '../lib/errors.js'
 import { newId } from '../lib/id.js'
 import { PrinterError } from './printerAdapter.js'
-import { buildReceipt } from './receiptBuilder.js'
+import { buildFullReceipt } from './receiptDocument.js'
 
 // Prints (or reprints) the receipt of a SAVED sale. This never changes the sale,
 // its items, or stock. It always returns the job record: check job.status
 // ('completed' | 'failed'). A printer problem does not throw.
-export async function printReceipt({
-  saleId,
-  printer,
-  paperWidth,
-  language = 'en',
-}) {
+// Without an explicit language, the language chosen in Settings is used.
+export async function printReceipt({ saleId, printer, paperWidth, language }) {
   const data = await getSale(saleId)
   if (!data) throw new AppError('NOT_FOUND', 'Sale not found')
 
   const settings = await getSettings()
   const width = paperWidth ?? settings.receiptPaperWidth
+  const lang = language ?? settings.receiptLanguage ?? 'en'
 
   // It is a reprint only if an earlier print really completed.
   const completedBefore = await db.printJobs
@@ -29,10 +26,11 @@ export async function printReceipt({
     .count()
   const isReprint = completedBefore > 0
 
-  const receipt = buildReceipt(data.sale, data.items, {
+  const receipt = buildFullReceipt(data.sale, data.items, {
     paperWidth: width,
-    language,
+    language: lang,
     reprint: isReprint,
+    textSize: settings.receiptTextSize,
   })
 
   const job = {
@@ -41,7 +39,7 @@ export async function printReceipt({
     kind: 'receipt',
     printer: printer.id,
     paperWidth: receipt.paperWidth,
-    language,
+    language: lang,
     isReprint,
     status: 'pending',
     confirmation: 'none',

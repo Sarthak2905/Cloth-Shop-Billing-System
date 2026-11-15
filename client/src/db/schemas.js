@@ -8,6 +8,8 @@ export const productInputSchema = z.object({
   category: text(60),
   brand: z.string().trim().max(60),
   supplier: z.string().trim().max(120),
+  // optional, so products saved before this setting existed can still be edited
+  discountAllowed: z.boolean().optional(),
 })
 
 const variantFields = {
@@ -53,7 +55,11 @@ export const settingsSchema = z.object({
     .trim()
     .regex(/^[A-Z0-9]{1,6}$/, 'Use 1-6 capital letters or digits'),
   receiptFooter: z.string().trim().max(120),
-  receiptPaperWidth: z.enum(['58', '80']),
+  receiptPaperWidth: z.enum(['58', '80', '80-42']),
+  receiptPrinter: z.enum(['simulated:ok', 'browser']),
+  receiptTextSize: z.enum(['normal', 'large', 'extra']),
+  receiptLanguage: z.enum(['en', 'mr']),
+  autoPrintReceipt: z.boolean(),
   allowNegativeStock: z.boolean(),
   roundToRupee: z.boolean(),
 })

@@ -5,43 +5,33 @@ import StatusBar from './StatusBar'
 import SyncBadge from './SyncBadge'
 
 const linkClass = ({ isActive }) =>
-    `rounded-lg px-3 py-1 text-sm font-medium ${isActive ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-slate-200'
+    `shrink-0 whitespace-nowrap rounded-lg px-3 py-1.5 text-sm font-medium ${isActive ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-slate-200'
     }`
+
+const LINKS = [
+    ['/billing', 'Billing'],
+    ['/sales', 'Sales'],
+    ['/products', 'Products'],
+    ['/labels', 'Labels'],
+    ['/settings', 'Settings'],
+    ['/sync', 'Sync'],
+    ['/backup', 'Backup'],
+    ['/storage', 'Storage'],
+    ['/scanner', 'Scanner Test'],
+]
 
 function LayoutBody() {
     return (
         <div className="min-h-screen bg-slate-100 print:bg-white">
             <header className="bg-white shadow-sm print:hidden">
-                <div className="mx-auto flex max-w-3xl items-center justify-between px-4 py-3">
+                <div className="mx-auto max-w-3xl px-4 py-3">
                     <h1 className="text-lg font-bold">Clothing POS</h1>
-                    <nav className="flex flex-wrap justify-end gap-2">
-                        <NavLink to="/billing" className={linkClass}>
-                            Billing
-                        </NavLink>
-                        <NavLink to="/sales" className={linkClass}>
-                            Sales
-                        </NavLink>
-                        <NavLink to="/products" className={linkClass}>
-                            Products
-                        </NavLink>
-                        <NavLink to="/labels" className={linkClass}>
-                            Labels
-                        </NavLink>
-                        <NavLink to="/settings" className={linkClass}>
-                            Settings
-                        </NavLink>
-                        <NavLink to="/sync" className={linkClass}>
-                            Sync
-                        </NavLink>
-                        <NavLink to="/backup" className={linkClass}>
-                            Backup
-                        </NavLink>
-                        <NavLink to="/storage" className={linkClass}>
-                            Storage
-                        </NavLink>
-                        <NavLink to="/scanner" className={linkClass}>
-                            Scanner Test
-                        </NavLink>
+                    <nav className="-mx-1 mt-2 flex gap-1 overflow-x-auto px-1 pb-1">
+                        {LINKS.map(([to, label]) => (
+                            <NavLink key={to} to={to} className={linkClass}>
+                                {label}
+                            </NavLink>
+                        ))}
                     </nav>
                 </div>
             </header>

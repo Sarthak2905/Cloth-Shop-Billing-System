@@ -42,6 +42,12 @@ export function discountAmount(discount, basePaise) {
   return Math.min(discount.value, basePaise)
 }
 
+// A line can take a BILL discount unless its product does not allow discounts, or
+// the cashier switched discounts off for it on this bill.
+export function isDiscountEligible(line) {
+  return line.discountAllowed !== false && line.discountExcluded !== true
+}
+
 export function calculateTotals(cart, { roundToRupee = true } = {}) {
   const base = cart.lines.map((line) => {
     const grossPaise = line.unitPricePaise * line.quantity
@@ -51,14 +57,19 @@ export function calculateTotals(cart, { roundToRupee = true } = {}) {
       grossPaise,
       lineDiscountPaise,
       afterItemPaise: grossPaise - lineDiscountPaise,
+      eligible: isDiscountEligible(line),
     }
   })
 
-  const afterItemTotal = base.reduce((sum, b) => sum + b.afterItemPaise, 0)
-  const billDiscountPaise = discountAmount(cart.billDiscount, afterItemTotal)
+  // The bill discount is worked out on the eligible items only, and shared among them.
+  const eligibleBasePaise = base.reduce(
+    (sum, b) => (b.eligible ? sum + b.afterItemPaise : sum),
+    0,
+  )
+  const billDiscountPaise = discountAmount(cart.billDiscount, eligibleBasePaise)
   const shares = allocateProportionally(
     billDiscountPaise,
-    base.map((b) => b.afterItemPaise),
+    base.map((b) => (b.eligible ? b.afterItemPaise : 0)),
   )
 
   const lines = base.map((b, i) => {
@@ -86,6 +97,7 @@ export function calculateTotals(cart, { roundToRupee = true } = {}) {
       grossPaise: b.grossPaise,
       lineDiscountPaise: b.lineDiscountPaise,
       billDiscountSharePaise: shares[i],
+      discountEligible: b.eligible,
       netPaise,
       taxableValuePaise,
       taxPaise,
@@ -109,6 +121,7 @@ export function calculateTotals(cart, { roundToRupee = true } = {}) {
     itemCount: lines.reduce((total, l) => total + l.quantity, 0),
     subtotalPaise: sum('grossPaise'),
     itemDiscountPaise: sum('lineDiscountPaise'),
+    eligibleBasePaise,
     billDiscountPaise,
     discountPaise: sum('lineDiscountPaise') + billDiscountPaise,
     taxableValuePaise: sum('taxableValuePaise'),

@@ -100,18 +100,36 @@ test('only sales that are still pending are collected', async () => {
   expect(sales.map((op) => op.entityId)).toEqual([second.sale.id])
 })
 
+
 test('a stock change does not make an item pending, but a price change does', async () => {
   const { variant } = await seedAndSell()
+
   await markVariantsSynced(ofKind(await collectPending(), 'variant'))
   expect(ofKind(await collectPending(), 'variant')).toHaveLength(0)
 
-  await adjustStock({ variantId: variant.id, quantityChange: -1, type: 'adjustment', reason: 'Damaged' })
+  await adjustStock({
+    variantId: variant.id,
+    quantityChange: -1,
+    type: 'adjustment',
+    reason: 'Damaged',
+  })
+
   expect(ofKind(await collectPending(), 'variant')).toHaveLength(0)
 
-  await updateVariant(variant.id, { sellingPricePaise: 70000 })
+  // Choose a different price that respects the MRP validation rule.
+  const newSellingPricePaise =
+    variant.sellingPricePaise < variant.mrpPaise
+      ? variant.sellingPricePaise + 1
+      : variant.sellingPricePaise - 1
+
+  await updateVariant(variant.id, {
+    sellingPricePaise: newSellingPricePaise,
+  })
+
   const pending = ofKind(await collectPending(), 'variant')
   expect(pending.map((op) => op.entityId)).toEqual([variant.id])
 })
+
 
 test('splits operations into batches and keeps their order', () => {
   expect(chunk([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]])

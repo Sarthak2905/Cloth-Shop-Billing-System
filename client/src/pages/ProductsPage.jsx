@@ -11,11 +11,16 @@ export default function ProductsPage() {
 
     return (
         <div className="space-y-4">
-            <div className="flex items-center justify-between">
+            <div className="space-y-3">
                 <h2 className="text-xl font-bold">Products</h2>
-                <Link to="/products/new" className={primaryButton}>
-                    + New product
-                </Link>
+                <div className="grid grid-cols-2 gap-2">
+                    <Link to="/import" className={`${secondaryButton} text-center`}>
+                        Import from file
+                    </Link>
+                    <Link to="/products/new" className={`${primaryButton} text-center`}>
+                        + New product
+                    </Link>
+                </div>
             </div>
 
             <input
@@ -48,28 +53,28 @@ export default function ProductsPage() {
                 </div>
             )}
 
-            <ul className="space-y-2">
+            <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 {rows?.map(({ product, variants, totalStock, lowStock }) => (
                     <li key={product.id}>
                         <Link
                             to={`/products/${product.id}`}
-                            className="block rounded-xl bg-white p-4 shadow-sm hover:shadow"
+                            className="block h-full rounded-xl bg-white p-4 shadow-sm hover:shadow"
                         >
                             <div className="flex items-start justify-between gap-2">
-                                <div>
+                                <div className="min-w-0">
                                     <p className="font-semibold">{product.name}</p>
                                     <p className="text-sm text-slate-500">
                                         {[product.brand, product.category].filter(Boolean).join(' · ')}
                                     </p>
                                 </div>
                                 {lowStock && (
-                                    <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">
+                                    <span className="shrink-0 whitespace-nowrap rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">
                                         Low stock
                                     </span>
                                 )}
                             </div>
                             <p className="mt-2 text-sm text-slate-600">
-                                {variants.length} variants · {totalStock} in stock
+                                {variants.length} {variants.length === 1 ? 'variant' : 'variants'} · {totalStock} in stock
                             </p>
                         </Link>
                     </li>

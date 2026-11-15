@@ -1,15 +1,16 @@
 import { useMemo, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { getSale } from '../db/saleRepo'
 import { getSettings } from '../db/settingsRepo'
-import { buildReceipt } from '../printing/receiptBuilder'
-import { SIMULATED_MODES, createSimulatedPrinter } from '../printing/printerAdapter'
+import { buildFullReceipt } from '../printing/receiptDocument'
+import { PRINTER_CHOICES, createPrinter } from '../printing/printerFactory'
 import { listPrintJobs, printReceipt } from '../printing/printService'
 import BillTotals from '../components/BillTotals'
+import CorrectBillPanel from '../components/CorrectBillPanel'
 import FormField from '../components/FormField'
 import ReceiptPreview from '../components/ReceiptPreview'
-import { inputClass, primaryButton } from '../components/styles'
+import { inputClass, primaryButton, secondaryButton } from '../components/styles'
 import { PAYMENT_LABEL, formatDateTime } from '../lib/format'
 import { formatINR } from '../lib/money'
 
@@ -30,28 +31,38 @@ function jobStatusText(job) {
 
 export default function SaleDetailPage() {
     const { id } = useParams()
+    const navigate = useNavigate()
     // undefined = loading, null = not found
     const data = useLiveQuery(async () => (await getSale(id)) ?? null, [id])
     const settings = useLiveQuery(() => getSettings(), [])
     const jobs = useLiveQuery(() => listPrintJobs(id), [id])
 
     const [widthChoice, setWidthChoice] = useState(null)
-    const [language, setLanguage] = useState('en')
-    const [printerMode, setPrinterMode] = useState('ok')
+    const [languagePick, setLanguagePick] = useState(null)
+    const [printerPick, setPrinterPick] = useState(null)
     const [printing, setPrinting] = useState(false)
     const [message, setMessage] = useState(null)
+    const [showCorrect, setShowCorrect] = useState(false)
 
     const paperWidth = widthChoice ?? settings?.receiptPaperWidth ?? '58'
+    const language = languagePick ?? settings?.receiptLanguage ?? 'en'
+    const printerChoice = printerPick ?? settings?.receiptPrinter ?? 'simulated:ok'
     const hasPrinted = (jobs ?? []).some((job) => job.status === 'completed')
 
     // The preview shows what the NEXT print will look like (including the
     // duplicate marker once a print has really completed).
+    const textSize = settings?.receiptTextSize ?? 'large'
     const receipt = useMemo(
         () =>
             data
-                ? buildReceipt(data.sale, data.items, { paperWidth, language, reprint: hasPrinted })
+                ? buildFullReceipt(data.sale, data.items, {
+                    paperWidth,
+                    language,
+                    reprint: hasPrinted,
+                    textSize,
+                })
                 : null,
-        [data, paperWidth, language, hasPrinted],
+        [data, paperWidth, language, hasPrinted, textSize],
     )
 
     async function handlePrint() {
@@ -61,7 +72,7 @@ export default function SaleDetailPage() {
         try {
             const job = await printReceipt({
                 saleId: id,
-                printer: createSimulatedPrinter(printerMode),
+                printer: createPrinter(printerChoice),
                 paperWidth,
                 language,
             })
@@ -78,6 +89,13 @@ export default function SaleDetailPage() {
         } finally {
             setPrinting(false)
         }
+    }
+
+    // The owner PIN was accepted: open the bill on the billing screen for correction.
+    function handleAuthorized({ reason }) {
+        navigate('/billing', {
+            state: { correction: { saleId: id, reason, authorizedAt: Date.now() } },
+        })
     }
 
     if (data === undefined) return <p className="text-slate-500">Loading...</p>
@@ -105,6 +123,36 @@ export default function SaleDetailPage() {
                 <p className="text-sm text-slate-500">{formatDateTime(sale.createdAt)}</p>
                 <p className="text-sm text-slate-500">{sale.shop.name}</p>
             </div>
+
+            {sale.status === 'cancelled' && (
+                <div
+                    role="status"
+                    data-testid="cancelled-banner"
+                    className="rounded-xl border-l-4 border-red-500 bg-red-50 p-4 text-sm text-red-900"
+                >
+                    <p className="font-semibold">This bill was cancelled</p>
+                    <p>
+                        {formatDateTime(sale.cancelledAt)} · Reason: {sale.cancelReason}
+                    </p>
+                    {sale.replacedBySaleId && (
+                        <p>
+                            Replaced by{' '}
+                            <Link to={`/sales/${sale.replacedBySaleId}`} className="font-semibold underline">
+                                {sale.replacedByInvoice}
+                            </Link>
+                        </p>
+                    )}
+                </div>
+            )}
+
+            {sale.replacesSaleId && (
+                <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-900">
+                    This bill replaces{' '}
+                    <Link to={`/sales/${sale.replacesSaleId}`} className="font-semibold underline">
+                        {sale.replacesInvoice}
+                    </Link>
+                </p>
+            )}
 
             <ul className="space-y-2">
                 {items.map((item) => (
@@ -143,6 +191,15 @@ export default function SaleDetailPage() {
                 {sale.payment.reference && <p>Reference: {sale.payment.reference}</p>}
             </div>
 
+            {sale.status === 'completed' &&
+                (showCorrect ? (
+                    <CorrectBillPanel invoiceNumber={sale.invoiceNumber} onAuthorized={handleAuthorized} />
+                ) : (
+                    <button type="button" className={secondaryButton} onClick={() => setShowCorrect(true)}>
+                        Correct this bill
+                    </button>
+                ))}
+
             <h3 className="text-lg font-bold">Receipt</h3>
 
             <div className="grid grid-cols-1 gap-3 rounded-xl bg-white p-4 shadow-sm sm:grid-cols-3">
@@ -155,6 +212,7 @@ export default function SaleDetailPage() {
                     >
                         <option value="58">58 mm (32 characters)</option>
                         <option value="80">80 mm (48 characters)</option>
+                        <option value="80-42">80 mm (42 characters)</option>
                     </select>
                 </FormField>
                 <FormField label="Receipt language" htmlFor="rc-lang">
@@ -162,20 +220,20 @@ export default function SaleDetailPage() {
                         id="rc-lang"
                         className={inputClass}
                         value={language}
-                        onChange={(e) => setLanguage(e.target.value)}
+                        onChange={(e) => setLanguagePick(e.target.value)}
                     >
                         <option value="en">English</option>
                         <option value="mr">मराठी</option>
                     </select>
                 </FormField>
-                <FormField label="Simulated printer" htmlFor="rc-printer">
+                <FormField label="Printer" htmlFor="rc-printer">
                     <select
                         id="rc-printer"
                         className={inputClass}
-                        value={printerMode}
-                        onChange={(e) => setPrinterMode(e.target.value)}
+                        value={printerChoice}
+                        onChange={(e) => setPrinterPick(e.target.value)}
                     >
-                        {Object.entries(SIMULATED_MODES).map(([value, label]) => (
+                        {Object.entries(PRINTER_CHOICES).map(([value, label]) => (
                             <option key={value} value={value}>
                                 {label}
                             </option>
@@ -196,8 +254,10 @@ export default function SaleDetailPage() {
                     {printing ? 'Printing...' : hasPrinted ? 'Reprint receipt' : 'Print receipt'}
                 </button>
                 <p className="text-xs text-slate-500">
-                    Printing here is simulated. A real printer is connected in a later phase. The sale is
-                    already saved, so a print problem never loses it.
+                    {printerChoice === 'browser'
+                        ? 'This sends the receipt to the Windows printer. The app cannot tell whether paper came out, so it records "sent to the printer".'
+                        : 'This is a simulated printer: nothing comes out. Choose "Windows printer" to print for real.'}{' '}
+                    The sale is already saved, so a print problem never loses it.
                 </p>
                 {message && (
                     <p

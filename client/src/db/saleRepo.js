@@ -138,6 +138,8 @@ export async function createSale({ id, cart, payment }) {
           taxRatePercent: line.taxRatePercent,
           priceIncludesTax: line.priceIncludesTax,
           discount: line.discount ?? null,
+          discountAllowed: line.discountAllowed !== false,
+          discountExcluded: line.discountExcluded === true,
           grossPaise: t.grossPaise,
           lineDiscountPaise: t.lineDiscountPaise,
           billDiscountSharePaise: t.billDiscountSharePaise,

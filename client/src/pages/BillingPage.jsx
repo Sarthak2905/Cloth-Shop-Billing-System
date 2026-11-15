@@ -1,10 +1,12 @@
+import ReceiptPrintButton from '../components/ReceiptPrintButton'
 import { isStorageFull } from '../lib/storageErrors'
-import { useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { listSellableVariants } from '../db/catalogRepo'
 import { getSettings } from '../db/settingsRepo'
 import { createSale } from '../db/saleRepo'
+import { buildCorrectionCart, correctSale } from '../db/correctionRepo'
 import { lookupBarcode } from '../scanner/scanService'
 import { useBarcodeScanner } from '../scanner/useBarcodeScanner'
 import { simulateKeyboardScan } from '../scanner/simulateScan'
@@ -21,6 +23,7 @@ import { calculateTotals } from '../billing/calc'
 import CameraScanner from '../components/CameraScanner'
 import CartLine from '../components/CartLine'
 import BillTotals from '../components/BillTotals'
+import CorrectionPayment from '../components/CorrectionPayment'
 import DiscountEditor from '../components/DiscountEditor'
 import FormField from '../components/FormField'
 import PaymentPanel from '../components/PaymentPanel'
@@ -31,13 +34,21 @@ import { newId } from '../lib/id'
 import { formatINR } from '../lib/money'
 
 const QUICK_PERCENT = 10
+const CORRECTION_WINDOW_MS = 15 * 60 * 1000 // the owner PIN approval is valid for 15 minutes
 
 export default function BillingPage() {
+    const location = useLocation()
+    const navigate = useNavigate()
+    const authSaleId = location.state?.correction?.saleId
+    const authAt = location.state?.correction?.authorizedAt
+    const authReason = location.state?.correction?.reason
+
     const [cart, setCart] = useState(createCart)
     const cartRef = useRef(cart) // always the newest cart, even during fast scans
     const saleIdRef = useRef(null) // idempotency key for the sale being saved
     const [notice, setNotice] = useState(null)
     const [completed, setCompleted] = useState(null)
+    const [correction, setCorrection] = useState(null) // { sale, reason } while correcting a bill
     const [code, setCode] = useState('')
     const [search, setSearch] = useState('')
     const [cameraOn, setCameraOn] = useState(false)
@@ -46,6 +57,9 @@ export default function BillingPage() {
     const settings = useLiveQuery(() => getSettings(), [])
     const items = useLiveQuery(() => listSellableVariants(), [])
     const allowNegativeStock = settings?.allowNegativeStock ?? false
+    // While correcting, the old quantities are put back when saving, so the screen does
+    // not block here. The real stock check happens when the corrected bill is saved.
+    const stockRule = correction ? true : allowNegativeStock
     const roundToRupee = settings?.roundToRupee ?? true
 
     const totals = useMemo(
@@ -53,6 +67,40 @@ export default function BillingPage() {
         [cart, roundToRupee],
     )
     const totalsByVariant = new Map(totals.lines.map((l) => [l.variantId, l]))
+
+    // Opens the old bill for correction when the owner PIN was accepted on the sale page.
+    useEffect(() => {
+        if (!authSaleId) return undefined
+        if (!Number.isFinite(authAt) || Date.now() - authAt > CORRECTION_WINDOW_MS) {
+            setNotice({
+                type: 'error',
+                text: 'The owner PIN approval has expired. Open the bill and tap "Correct this bill" again.',
+            })
+            return undefined
+        }
+        let active = true
+        buildCorrectionCart(authSaleId)
+            .then(({ sale, cart: start }) => {
+                if (!active) return
+                cartRef.current = start
+                saleIdRef.current = null
+                setCart(start)
+                setCompleted(null)
+                setNotice(null)
+                setCorrection({ sale, reason: authReason })
+            })
+            .catch((err) => {
+                if (!active) return
+                if (!(err instanceof AppError)) console.error(err)
+                setNotice({
+                    type: 'error',
+                    text: err instanceof AppError ? err.message : 'Could not open this bill for correction.',
+                })
+            })
+        return () => {
+            active = false
+        }
+    }, [authSaleId, authAt, authReason])
 
     // Runs a cart change. Returns the error message, or null when it worked.
     function applyChange(change, successText) {
@@ -71,7 +119,7 @@ export default function BillingPage() {
 
     function addToBill(variant, product) {
         applyChange(
-            (c) => addItem(c, lineFromVariant(variant, product), { allowNegativeStock }),
+            (c) => addItem(c, lineFromVariant(variant, product), { allowNegativeStock: stockRule }),
             `Added ${product.name} (size ${variant.size})`,
         )
     }
@@ -106,6 +154,25 @@ export default function BillingPage() {
         setNotice(null)
     }
 
+    function handleCancelCorrection() {
+        const oldId = correction?.sale.id
+        cartRef.current = createCart()
+        saleIdRef.current = null
+        setCart(cartRef.current)
+        setCorrection(null)
+        setNotice(null)
+        navigate(oldId ? `/sales/${oldId}` : '/billing', { replace: true, state: null })
+    }
+
+    function errorText(err) {
+        if (err instanceof AppError) return err.message
+        console.error(err)
+        if (isStorageFull(err)) {
+            return 'This device is out of storage space. Free up space and try again. Nothing was saved.'
+        }
+        return null
+    }
+
     // Saves the sale. Returns an error message, or null when it worked.
     async function completeSale(payment) {
         saleIdRef.current ??= newId()
@@ -122,12 +189,35 @@ export default function BillingPage() {
             setNotice(null)
             return null
         } catch (err) {
-            if (err instanceof AppError) return err.message
-            console.error(err)
-            if (isStorageFull(err)) {
-                return 'This device is out of storage space. Free up space and try again. Nothing was saved.'
-            }
-            return 'Could not save the sale. Nothing was charged. Please try again.'
+            return errorText(err) ?? 'Could not save the sale. Nothing was charged. Please try again.'
+        }
+    }
+
+    // Saves the corrected bill: cancels the old one and makes a new invoice.
+    async function completeCorrection(payment) {
+        if (!correction) return 'There is no bill to correct.'
+        saleIdRef.current ??= newId()
+        try {
+            const { sale } = await correctSale({
+                oldSaleId: correction.sale.id,
+                newSaleId: saleIdRef.current,
+                reason: correction.reason,
+                cart: cartRef.current,
+                payment,
+            })
+            saleIdRef.current = null
+            cartRef.current = createCart()
+            setCart(cartRef.current)
+            setCompleted(sale)
+            setCorrection(null)
+            setNotice(null)
+            navigate('/billing', { replace: true, state: null })
+            return null
+        } catch (err) {
+            return (
+                errorText(err) ??
+                'Could not save the corrected bill. The old bill was not changed. Please try again.'
+            )
         }
     }
 
@@ -148,7 +238,24 @@ export default function BillingPage() {
 
     return (
         <div className="space-y-4">
-            <h2 className="text-xl font-bold">Billing</h2>
+            <h2 className="text-xl font-bold">{correction ? 'Correct bill' : 'Billing'}</h2>
+
+            {correction && (
+                <div
+                    role="status"
+                    data-testid="correction-banner"
+                    className="space-y-2 rounded-xl border-l-4 border-amber-500 bg-amber-50 p-4"
+                >
+                    <p className="font-semibold text-amber-900">Correcting {correction.sale.invoiceNumber}</p>
+                    <p className="text-sm text-amber-900">
+                        Reason: {correction.reason}. Original total {formatINR(correction.sale.totalPaise)}.
+                        Saving cancels the old bill and makes a new invoice.
+                    </p>
+                    <button type="button" className={secondaryButton} onClick={handleCancelCorrection}>
+                        Cancel correction
+                    </button>
+                </div>
+            )}
 
             <div className="space-y-3 rounded-xl bg-white p-4 shadow-sm">
                 <form onSubmit={handleSubmit} className="space-y-3">
@@ -234,8 +341,15 @@ export default function BillingPage() {
                     role="status"
                     className="space-y-2 rounded-xl border-l-4 border-green-500 bg-white p-4 shadow-sm"
                 >
-                    <p className="font-semibold text-green-700">Sale saved</p>
+                    <p className="font-semibold text-green-700">
+                        {completed.replacesInvoice ? 'Corrected bill saved' : 'Sale saved'}
+                    </p>
                     <p className="text-lg font-bold">Invoice {completed.invoiceNumber}</p>
+                    {completed.replacesInvoice && (
+                        <p className="text-sm text-slate-600">
+                            Replaces {completed.replacesInvoice} (now cancelled)
+                        </p>
+                    )}
                     <p className="text-sm text-slate-600">
                         Total {formatINR(completed.totalPaise)} · {PAYMENT_LABEL[completed.payment.method]}
                     </p>
@@ -244,6 +358,7 @@ export default function BillingPage() {
                             Change due: {formatINR(completed.payment.changePaise)}
                         </p>
                     )}
+                    <ReceiptPrintButton saleId={completed.id} />
                     <div className="flex gap-2">
                         <Link to={`/sales/${completed.id}`} className={secondaryButton}>
                             View sale
@@ -268,7 +383,9 @@ export default function BillingPage() {
                                 line={line}
                                 totals={totalsByVariant.get(line.variantId)}
                                 onQuantity={(q) =>
-                                    applyChange((c) => setQuantity(c, line.variantId, q, { allowNegativeStock }))
+                                    applyChange((c) =>
+                                        setQuantity(c, line.variantId, q, { allowNegativeStock: stockRule }),
+                                    )
                                 }
                                 onRemove={() => applyChange((c) => removeItem(c, line.variantId))}
                                 onDiscount={(d) => applyChange((c) => setLineDiscount(c, line.variantId, d))}
@@ -300,11 +417,21 @@ export default function BillingPage() {
 
                     <BillTotals totals={totals} />
 
-                    <PaymentPanel totalPaise={totals.totalPaise} onComplete={completeSale} />
+                    {correction ? (
+                        <CorrectionPayment
+                            totalPaise={totals.totalPaise}
+                            oldTotalPaise={correction.sale.totalPaise}
+                            onComplete={completeCorrection}
+                        />
+                    ) : (
+                        <PaymentPanel totalPaise={totals.totalPaise} onComplete={completeSale} />
+                    )}
 
-                    <button type="button" className={secondaryButton} onClick={handleClearBill}>
-                        Clear bill
-                    </button>
+                    {!correction && (
+                        <button type="button" className={secondaryButton} onClick={handleClearBill}>
+                            Clear bill
+                        </button>
+                    )}
                 </>
             )}
         </div>
