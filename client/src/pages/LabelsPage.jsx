@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { listSellableVariants } from '../db/catalogRepo'
 import { chooseSymbology } from '../labels/ean'
@@ -6,17 +6,26 @@ import { LABEL_PRESETS, buildLabel, validateLabelSize } from '../labels/labelMod
 import LabelPreview from '../components/LabelPreview'
 import FormField from '../components/FormField'
 import { inputClass, primaryButton, secondaryButton } from '../components/styles'
+import { clearLabelPreset, readLabelPreset } from '../lib/labelPreset'
 
 const MAX_LABELS = 200
 
+const stockText = (variant) =>
+    variant.unit === 'meter' ? `${(variant.currentStock / 100).toFixed(2)} m` : String(variant.currentStock)
+
 export default function LabelsPage() {
     const items = useLiveQuery(() => listSellableVariants(), [])
-    const [copies, setCopies] = useState({})
+    // Coming from "Add stock", the new entries already have their copies filled in.
+    const [copies, setCopies] = useState(() => readLabelPreset())
     const [presetId, setPresetId] = useState(LABEL_PRESETS[0].id)
     const [customWidth, setCustomWidth] = useState('50')
     const [customHeight, setCustomHeight] = useState('25')
     const [priceMode, setPriceMode] = useState('mrp')
     const [search, setSearch] = useState('')
+
+    useEffect(() => {
+        clearLabelPreset()
+    }, [])
 
     const preset = LABEL_PRESETS.find((p) => p.id === presetId)
     const widthMm = preset ? preset.widthMm : Number(customWidth)
@@ -28,7 +37,6 @@ export default function LabelsPage() {
         ({ variant, product }) =>
             !query ||
             product.name.toLowerCase().includes(query) ||
-            variant.sku.toLowerCase().includes(query) ||
             variant.barcode.toLowerCase().includes(query),
     )
 
@@ -53,6 +61,18 @@ export default function LabelsPage() {
         setCopies((c) => {
             const next = { ...c }
             for (const { variant } of shown) next[variant.id] = 1
+            return next
+        })
+    }
+
+    // One label for each piece in stock (at most 99 for one entry; fabric by the meter gets 1).
+    function copiesFromStock() {
+        setCopies((c) => {
+            const next = { ...c }
+            for (const { variant } of shown) {
+                next[variant.id] =
+                    variant.unit === 'meter' ? 1 : Math.max(0, Math.min(99, variant.currentStock))
+            }
             return next
         })
     }
@@ -124,7 +144,7 @@ export default function LabelsPage() {
                             className={inputClass}
                             value={search}
                             onChange={(e) => setSearch(e.target.value)}
-                            placeholder="Name, SKU or barcode"
+                            placeholder="Name or barcode"
                         />
                     </FormField>
                     <div className="flex flex-wrap gap-2">
@@ -136,13 +156,21 @@ export default function LabelsPage() {
                         >
                             Set 1 copy of each shown
                         </button>
+                        <button
+                            type="button"
+                            className={secondaryButton}
+                            disabled={!shown.length}
+                            onClick={copiesFromStock}
+                        >
+                            Copies = stock for items shown
+                        </button>
                         <button type="button" className={secondaryButton} onClick={() => setCopies({})}>
                             Clear all copies
                         </button>
                     </div>
 
                     {items && items.length === 0 && (
-                        <p className="text-sm text-slate-500">No products yet. Add products first.</p>
+                        <p className="text-sm text-slate-500">No products yet. Add stock first.</p>
                     )}
 
                     <ul className="space-y-2">
@@ -155,10 +183,11 @@ export default function LabelsPage() {
                                 >
                                     <div>
                                         <p className="font-medium">
-                                            {product.name} · Size {variant.size}
+                                            {product.name}
+                                            {variant.size ? ` · Size ${variant.size}` : ''}
                                         </p>
                                         <p className="text-xs text-slate-500">
-                                            {variant.sku} · {variant.barcode}
+                                            {variant.barcode} · Stock {stockText(variant)}
                                         </p>
                                         {warning && <p className="text-xs text-amber-700">{warning}</p>}
                                     </div>

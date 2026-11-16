@@ -1,22 +1,26 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { db } from '../db/db'
+import { readLabelPreset } from '../lib/labelPreset'
 import ImportPage from './ImportPage'
 
 const HEAD = [
-    'Product Name', 'Category', 'Brand', 'Supplier', 'Size', 'SKU', 'Barcode',
-    'Cost Price', 'MRP', 'Selling Price', 'Tax %', 'Price Includes Tax',
-    'Opening Stock', 'Low Stock Alert', 'Allow Discount',
+    'Product Name', 'Size', 'Quantity', 'Cost', 'Selling Price',
+    'Company', 'Category', 'MRP', 'Tax %', 'Price Includes Tax', 'Allow Discount',
 ]
 const row = (over = {}) => {
-    const merged = { 'Product Name': 'Shirt', Category: 'Shirts', Size: 'M', 'Selling Price': 599, ...over }
+    const merged = { 'Product Name': 'Shirt', Size: 'M', Quantity: 10, 'Selling Price': 599, ...over }
     return HEAD.map((h) => merged[h] ?? '')
 }
 
 function renderPage(readTableFn, props = {}) {
     return render(
-        <MemoryRouter>
-            <ImportPage readTableFn={readTableFn} {...props} />
+        <MemoryRouter initialEntries={['/import']}>
+            <Routes>
+                <Route path="/import" element={<ImportPage readTableFn={readTableFn} {...props} />} />
+                <Route path="/labels" element={<p>Labels page</p>} />
+                <Route path="/products" element={<p>Products list</p>} />
+            </Routes>
         </MemoryRouter>,
     )
 }
@@ -27,6 +31,7 @@ const choose = () =>
 
 beforeEach(async () => {
     await Promise.all(db.tables.map((t) => t.clear()))
+    sessionStorage.clear()
 })
 
 test('the sample file can be downloaded', () => {
@@ -41,15 +46,15 @@ test('the sample file can be downloaded', () => {
 })
 
 test('a good file is checked, shown and imported with one click', async () => {
-    renderPage(vi.fn(async () => [HEAD, row({ Size: 'M' }), row({ Size: 'L' })]))
+    renderPage(vi.fn(async () => [HEAD, row({ Size: 'M' }), row({ Size: 'L', Quantity: 12 })]))
     choose()
 
-    const summary = await screen.findByTestId('import-summary')
-    expect(summary).toHaveTextContent('2 items ready to import')
+    expect(await screen.findByTestId('import-summary')).toHaveTextContent('2 entries ready to import')
+    expect(screen.getByTestId('import-summary')).toHaveTextContent('22 pieces')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Import 2 items' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Import 2 entries' }))
 
-    expect(await screen.findByTestId('import-done')).toHaveTextContent('2 items added')
+    expect(await screen.findByTestId('import-done')).toHaveTextContent('2 entries added')
     expect(await db.products.count()).toBe(1)
     expect(await db.variants.count()).toBe(2)
 })
@@ -65,7 +70,7 @@ test('problem rows are listed with their row numbers and only the good rows are 
     expect(problems[0]).toHaveTextContent('Row 3')
     expect(problems[0]).toHaveTextContent('Selling Price')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Import 1 item' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Import 1 entry' }))
     await screen.findByTestId('import-done')
     expect(await db.variants.count()).toBe(1)
 })
@@ -86,4 +91,41 @@ test('a file that cannot be read shows a message and changes nothing', async () 
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('could not be read'))
     expect(await db.products.count()).toBe(0)
     spy.mockRestore()
+})
+
+test('the same file again is warned about and needs a tick before it can be imported', async () => {
+    const rows = [HEAD, row({ Size: 'M' }), row({ Size: 'L', Quantity: 12 })]
+    renderPage(vi.fn(async () => rows))
+
+    choose()
+    await screen.findByTestId('import-summary')
+    fireEvent.click(screen.getByRole('button', { name: 'Import 2 entries' }))
+    await screen.findByTestId('import-done')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import another file' }))
+    choose()
+
+    expect(await screen.findByTestId('repeat-warning')).toHaveTextContent('imported before')
+    const button = screen.getByRole('button', { name: 'Import 2 entries' })
+    expect(button).toBeDisabled()
+
+    fireEvent.click(screen.getByLabelText('I want to import it again'))
+    expect(button).toBeEnabled()
+    fireEvent.click(button)
+
+    await screen.findByTestId('import-done')
+    expect(await db.variants.count()).toBe(4)
+})
+
+test('after an import, Print labels opens the Labels page with a copy for each piece', async () => {
+    renderPage(vi.fn(async () => [HEAD, row({ Size: 'M', Quantity: 10 }), row({ Size: 'L', Quantity: 12 })]))
+    choose()
+    await screen.findByTestId('import-summary')
+    fireEvent.click(screen.getByRole('button', { name: 'Import 2 entries' }))
+    await screen.findByTestId('import-done')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Print labels' }))
+
+    expect(await screen.findByText('Labels page')).toBeInTheDocument()
+    expect(Object.values(readLabelPreset()).sort((a, b) => a - b)).toEqual([10, 12])
 })

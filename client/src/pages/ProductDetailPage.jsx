@@ -2,27 +2,55 @@ import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { archiveProduct, getProduct, updateProduct } from '../db/productRepo'
-import { createVariant, listVariantsByProduct, updateVariant } from '../db/variantRepo'
+import { archiveVariant, listVariantsByProduct } from '../db/variantRepo'
+import EntryEditForm from '../components/EntryEditForm'
 import ProductForm from '../components/ProductForm'
-import VariantForm from '../components/VariantForm'
 import StockAdjustForm from '../components/StockAdjustForm'
 import { dangerButton, primaryButton, secondaryButton } from '../components/styles'
 import { formatINR } from '../lib/money'
 
+const dateOnly = (iso) =>
+    new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+
+// Pieces as a number, meters (stored as centimetres) as "2.35 m".
+const quantityText = (unit, n) => (unit === 'meter' ? `${(n / 100).toFixed(2)} m` : String(n))
+
+// All entries of the same size are grouped, newest entry first, with their total stock.
+function groupBySize(variants) {
+    const map = new Map()
+    for (const v of variants) {
+        const key = String(v.size ?? '').trim().toLowerCase()
+        if (!map.has(key)) {
+            map.set(key, { key, label: String(v.size ?? '').trim() || 'No size', unit: v.unit, entries: [], total: 0 })
+        }
+        const group = map.get(key)
+        group.entries.push(v)
+        if (v.status === 'active') group.total += v.currentStock
+    }
+    const groups = [...map.values()]
+    for (const g of groups) {
+        g.entries.sort(
+            (a, b) => b.createdAt.localeCompare(a.createdAt) || b.barcode.localeCompare(a.barcode),
+        )
+    }
+    return groups.sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }))
+}
+
 export default function ProductDetailPage() {
     const { id } = useParams()
     const navigate = useNavigate()
-
-    // undefined = still loading, null = not found
-    const product = useLiveQuery(async () => (await getProduct(id)) ?? null, [id])
-    const variants = useLiveQuery(() => listVariantsByProduct(id), [id])
+    // undefined = loading, null = not found
+    const data = useLiveQuery(async () => {
+        const product = await getProduct(id)
+        if (!product) return null
+        return { product, variants: await listVariantsByProduct(id) }
+    }, [id])
 
     const [editingProduct, setEditingProduct] = useState(false)
-    const [variantFormId, setVariantFormId] = useState(null) // 'new' | variant id | null
-    const [adjustId, setAdjustId] = useState(null)
+    const [panel, setPanel] = useState(null) // { id, mode: 'edit' | 'adjust' }
 
-    if (product === undefined) return <p className="text-slate-500">Loading...</p>
-    if (product === null) {
+    if (data === undefined) return <p className="text-slate-500">Loading...</p>
+    if (data === null) {
         return (
             <div className="space-y-2">
                 <p>Product not found.</p>
@@ -33,16 +61,20 @@ export default function ProductDetailPage() {
         )
     }
 
-    const archived = product.status === 'archived'
-    const activeVariants = (variants ?? []).filter((v) => v.status === 'active')
+    const { product, variants } = data
+    const groups = groupBySize(variants)
+    const archivedProduct = product.status === 'archived'
 
-    async function handleArchive() {
-        const ok = window.confirm(
-            `Archive "${product.name}"? It will be hidden from the product list and billing.`,
-        )
-        if (!ok) return
-        await archiveProduct(product.id)
+    async function handleArchiveProduct() {
+        if (!window.confirm(`Archive ${product.name}? Its stock can no longer be sold.`)) return
+        await archiveProduct(id)
         navigate('/products')
+    }
+
+    async function handleArchiveEntry(entry) {
+        if (!window.confirm('Archive this entry? Its stock can no longer be sold.')) return
+        await archiveVariant(entry.id)
+        setPanel(null)
     }
 
     return (
@@ -51,135 +83,136 @@ export default function ProductDetailPage() {
                 ← Back to products
             </Link>
 
-            {archived && (
-                <p className="rounded-lg bg-amber-100 p-3 text-sm text-amber-800">
-                    This product is archived.
-                </p>
-            )}
+            <div className="space-y-3 rounded-xl bg-white p-4 shadow-sm">
+                <div>
+                    <h2 className="text-xl font-bold">{product.name}</h2>
+                    <p className="text-sm text-slate-500">
+                        {[product.brand, product.category].filter(Boolean).join(' · ') || 'No company or category'}
+                    </p>
+                    {product.discountAllowed === false && (
+                        <p className="text-xs text-amber-700">This product never takes a discount.</p>
+                    )}
+                    {archivedProduct && <p className="text-sm font-semibold text-red-700">Archived</p>}
+                </div>
 
-            <div className="rounded-xl bg-white p-4 shadow-sm">
                 {editingProduct ? (
                     <ProductForm
                         initial={product}
-                        submitLabel="Save changes"
-                        onCancel={() => setEditingProduct(false)}
                         onSubmit={async (values) => {
-                            await updateProduct(product.id, values)
+                            await updateProduct(id, values)
                             setEditingProduct(false)
                         }}
+                        onCancel={() => setEditingProduct(false)}
                     />
                 ) : (
-                    <div className="flex items-start justify-between gap-2">
-                        <div>
-                                <h2 className="text-xl font-bold">
-                                    {product.name}
-                                    {product.discountAllowed === false && (
-                                        <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 align-middle text-xs font-medium text-amber-800">
-                                            No discount
-                                        </span>
-                                    )}
-                                </h2>
-                            <p className="text-sm text-slate-500">
-                                {[product.brand, product.category].filter(Boolean).join(' · ')}
-                            </p>
-                            {product.supplier && (
-                                <p className="text-sm text-slate-500">Supplier: {product.supplier}</p>
-                            )}
-                        </div>
-                        {!archived && (
-                            <button className={secondaryButton} onClick={() => setEditingProduct(true)}>
-                                Edit
+                    <div className="flex flex-wrap gap-2">
+                        {!archivedProduct && (
+                            <Link
+                                to="/stock/new"
+                                state={{ product: { name: product.name, category: product.category, brand: product.brand } }}
+                                className={primaryButton}
+                            >
+                                Add stock
+                            </Link>
+                        )}
+                        <button type="button" className={secondaryButton} onClick={() => setEditingProduct(true)}>
+                            Edit product
+                        </button>
+                        {!archivedProduct && (
+                            <button type="button" className={dangerButton} onClick={handleArchiveProduct}>
+                                Archive product
                             </button>
                         )}
                     </div>
                 )}
             </div>
 
-            <div className="flex items-center justify-between">
-                <h3 className="text-lg font-bold">Variants</h3>
-                {!archived && variantFormId !== 'new' && (
-                    <button className={primaryButton} onClick={() => setVariantFormId('new')}>
-                        + Add variant
-                    </button>
-                )}
-            </div>
-
-            {variantFormId === 'new' && (
-                <div className="rounded-xl bg-white p-4 shadow-sm">
-                    <VariantForm
-                        onCancel={() => setVariantFormId(null)}
-                        onSubmit={async (payload) => {
-                            await createVariant({ ...payload, productId: product.id })
-                            setVariantFormId(null)
-                        }}
-                    />
-                </div>
+            {groups.length === 0 && (
+                <p className="rounded-xl bg-white p-6 text-center text-slate-500 shadow-sm">
+                    No stock entered yet.
+                </p>
             )}
 
-            {variants !== undefined && activeVariants.length === 0 && variantFormId !== 'new' && (
-                <p className="text-slate-500">No variants yet. Add a size and colour to start selling.</p>
-            )}
+            {groups.map((group) => (
+                <section
+                    key={group.key}
+                    data-testid="size-group"
+                    className="space-y-3 rounded-xl bg-white p-4 shadow-sm"
+                >
+                    <div>
+                        <h3 className="text-lg font-semibold">
+                            {group.label === 'No size' ? 'No size' : `Size ${group.label}`}
+                        </h3>
+                        <p className="text-sm text-slate-600">
+                            Total {quantityText(group.unit, group.total)} in stock · {group.entries.length}{' '}
+                            {group.entries.length === 1 ? 'entry' : 'entries'}
+                        </p>
+                    </div>
 
-            <ul className="space-y-2">
-                {activeVariants.map((v) => (
-                    <li key={v.id} className="rounded-xl bg-white p-4 shadow-sm">
-                        {variantFormId === v.id ? (
-                            <VariantForm
-                                initial={v}
-                                onCancel={() => setVariantFormId(null)}
-                                onSubmit={async (payload) => {
-                                    await updateVariant(v.id, payload)
-                                    setVariantFormId(null)
-                                }}
-                            />
-                        ) : (
-                            <>
-                                <div className="flex justify-between gap-2">
-                                        <p className="font-semibold">Size {v.size}</p>
-                                    <p className="font-semibold">{formatINR(v.sellingPricePaise)}</p>
-                                </div>
-                                <p className="text-sm text-slate-500">
-                                    SKU {v.sku} · Barcode {v.barcode}
-                                </p>
-                                <p className="text-sm text-slate-500">
-                                    MRP {formatINR(v.mrpPaise)} · Cost {formatINR(v.costPaise)} · Tax{' '}
-                                    {v.taxRatePercent}%
-                                </p>
-                                <p
-                                    className={`mt-1 text-sm font-medium ${v.currentStock <= v.reorderThreshold ? 'text-red-600' : 'text-slate-700'
+                    <ul className="space-y-2">
+                        {group.entries.map((entry) => {
+                            const archived = entry.status !== 'active'
+                            const low = !archived && entry.currentStock <= entry.reorderThreshold
+                            return (
+                                <li
+                                    key={entry.id}
+                                    data-testid="entry-card"
+                                    className={`rounded-lg border p-3 ${archived ? 'border-slate-200 bg-slate-50 text-slate-400' : 'border-slate-200'
                                         }`}
                                 >
-                                    Stock: {v.currentStock}
-                                    {v.currentStock <= v.reorderThreshold && ' (low)'}
-                                </p>
-
-                                {!archived && (
-                                    <div className="mt-3 flex gap-2">
-                                        <button className={secondaryButton} onClick={() => setVariantFormId(v.id)}>
-                                            Edit
-                                        </button>
-                                        <button className={secondaryButton} onClick={() => setAdjustId(v.id)}>
-                                            Adjust stock
-                                        </button>
+                                    <div className="flex items-start justify-between gap-2">
+                                        <div>
+                                            <p className="text-sm font-semibold">
+                                                Added {dateOnly(entry.createdAt)} · {quantityText(entry.unit, entry.currentStock)} left
+                                            </p>
+                                            <p className="text-sm">
+                                                Cost {formatINR(entry.costPaise)} · Selling {formatINR(entry.sellingPricePaise)}
+                                                {entry.mrpPaise !== entry.sellingPricePaise && ` · MRP ${formatINR(entry.mrpPaise)}`}
+                                            </p>
+                                            <p className="font-mono text-xs">{entry.barcode}</p>
+                                        </div>
+                                        <div className="flex flex-col items-end gap-1">
+                                            {low && (
+                                                <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">
+                                                    Low stock
+                                                </span>
+                                            )}
+                                            {archived && (
+                                                <span className="rounded-full bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-600">
+                                                    Archived
+                                                </span>
+                                            )}
+                                        </div>
                                     </div>
-                                )}
 
-                                {adjustId === v.id && (
-                                    <StockAdjustForm variant={v} onDone={() => setAdjustId(null)} />
-                                )}
-                            </>
-                        )}
-                    </li>
-                ))}
-            </ul>
+                                    {!archived && (
+                                        <div className="mt-2 flex flex-wrap gap-2">
+                                            <button type="button" className={secondaryButton}
+                                                onClick={() => setPanel({ id: entry.id, mode: 'edit' })}>
+                                                Edit
+                                            </button>
+                                            <button type="button" className={secondaryButton}
+                                                onClick={() => setPanel({ id: entry.id, mode: 'adjust' })}>
+                                                Adjust stock
+                                            </button>
+                                            <button type="button" className={dangerButton} onClick={() => handleArchiveEntry(entry)}>
+                                                Archive
+                                            </button>
+                                        </div>
+                                    )}
 
-            {!archived && (
-                <div className="pt-4">
-                    <button className={dangerButton} onClick={handleArchive}>
-                        Archive product
-                    </button>
-                </div>
-            )}
+                                    {panel?.id === entry.id && panel.mode === 'edit' && (
+                                        <EntryEditForm entry={entry} onDone={() => setPanel(null)} />
+                                    )}
+                                    {panel?.id === entry.id && panel.mode === 'adjust' && (
+                                        <StockAdjustForm variant={entry} onDone={() => setPanel(null)} />
+                                    )}
+                                </li>
+                            )
+                        })}
+                    </ul>
+                </section>
+            ))}
         </div>
     )
 }

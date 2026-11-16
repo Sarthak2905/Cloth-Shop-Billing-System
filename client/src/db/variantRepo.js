@@ -5,59 +5,85 @@ import { AppError } from '../lib/errors.js'
 import { newId } from '../lib/id.js'
 
 const MOVEMENT_TYPES = ['opening', 'sale', 'purchase', 'return', 'adjustment']
+const BARCODE_PREFIX = 'CLO'
 
-export async function createVariant(input) {
+// For messages: pieces as a number, meters (stored as centimetres) as "2.35 m".
+function showQuantity(variant, quantity) {
+  return variant.unit === 'meter'
+    ? `${(quantity / 100).toFixed(2)} m`
+    : String(quantity)
+}
+
+// Hands out the next unused internal barcodes (CLO000001, CLO000002...).
+// Must run inside a transaction that includes db.settings and db.variants.
+export async function takeBarcodes(count) {
+  const row = await db.settings.get('barcodeCounter')
+  let counter = row?.value ?? 0
+  const codes = []
+  while (codes.length < count) {
+    counter += 1
+    const code = `${BARCODE_PREFIX}${String(counter).padStart(6, '0')}`
+    if (await db.variants.where('barcode').equals(code).first()) continue
+    codes.push(code)
+  }
+  await db.settings.put({ key: 'barcodeCounter', value: counter })
+  return codes
+}
+
+// Creates one stock entry (an item with its own barcode, stock, cost and price).
+// There is NO duplicate check on size or SKU: the same product and size can be
+// entered as many times as you like. Only the barcode must be unique.
+// Without a barcode, the next internal one is made automatically.
+export async function createVariant(input, { reason = 'Opening stock' } = {}) {
+  const typedBarcode = String(input.barcode ?? '').trim()
   const data = validate(variantCreateSchema, {
+    unit: 'piece',
     taxRatePercent: 0,
     priceIncludesTax: true,
     reorderThreshold: 0,
     openingStock: 0,
     ...input,
+    mrpPaise: input.mrpPaise ?? input.sellingPricePaise,
+    barcode: typedBarcode || undefined,
   })
-  const { openingStock, ...fields } = data
-  const now = new Date().toISOString()
-  const variant = {
-    id: newId(),
-    ...fields,
-    currentStock: openingStock,
-    status: 'active',
-    createdAt: now,
-    updatedAt: now,
-  }
 
+  let variant
   try {
     await db.transaction(
       'rw',
       db.products,
       db.variants,
       db.stockMovements,
+      db.settings,
       async () => {
-        if (!(await db.products.get(fields.productId))) {
+        if (!(await db.products.get(data.productId))) {
           throw new AppError('NOT_FOUND', 'Product not found')
         }
-        if (await db.variants.where('barcode').equals(fields.barcode).first()) {
-          throw new AppError(
-            'DUPLICATE_BARCODE',
-            `Barcode "${fields.barcode}" is already used`,
-          )
-        }
-        if (await db.variants.where('sku').equals(fields.sku).first()) {
-          throw new AppError(
-            'DUPLICATE_SKU',
-            `SKU "${fields.sku}" is already used`,
-          )
-        }
-        const sameSize = await db.variants
-          .where('[productId+size]')
-          .equals([fields.productId, fields.size])
-          .first()
-        if (sameSize) {
-          throw new AppError(
-            'DUPLICATE_VARIANT',
-            `This product already has size ${fields.size}`,
-          )
+
+        let barcode = data.barcode
+        if (barcode) {
+          if (await db.variants.where('barcode').equals(barcode).first()) {
+            throw new AppError(
+              'DUPLICATE_BARCODE',
+              `Barcode "${barcode}" is already used`,
+            )
+          }
+        } else {
+          barcode = (await takeBarcodes(1))[0]
         }
 
+        const { openingStock, ...fields } = data
+        const now = new Date().toISOString()
+        variant = {
+          id: newId(),
+          ...fields,
+          barcode,
+          sku: fields.sku || barcode,
+          currentStock: openingStock,
+          status: 'active',
+          createdAt: now,
+          updatedAt: now,
+        }
         await db.variants.add(variant)
 
         if (openingStock > 0) {
@@ -67,7 +93,7 @@ export async function createVariant(input) {
             type: 'opening',
             quantityChange: openingStock,
             stockAfter: openingStock,
-            reason: 'Opening stock',
+            reason,
             referenceId: null,
             createdAt: now,
           })
@@ -75,12 +101,9 @@ export async function createVariant(input) {
       },
     )
   } catch (err) {
-    // Safety net: the database's own unique index fired.
+    // Safety net: the database's own unique index on the barcode fired.
     if (err.name === 'ConstraintError') {
-      throw new AppError(
-        'DUPLICATE_VARIANT',
-        'A variant with these details already exists',
-      )
+      throw new AppError('DUPLICATE_BARCODE', 'That barcode is already used')
     }
     throw err
   }
@@ -103,27 +126,44 @@ export async function updateVariant(id, changes) {
   const existing = await db.variants.get(id)
   if (!existing) throw new AppError('NOT_FOUND', 'Variant not found')
 
+  // The unit (piece or meter) can never change after the item is created: its stock
+  // numbers would stop making sense. Whatever is passed in is ignored.
+  const unit = existing.unit ?? 'piece'
+
   // zod strips fields it does not know (like currentStock), so stock cannot
   // be changed through this function even if someone passes it in.
-  const data = validate(variantEditSchema, { ...existing, ...changes })
-  const updated = { ...existing, ...data, updatedAt: new Date().toISOString() }
+  const data = validate(variantEditSchema, { ...existing, ...changes, unit })
+  const updated = {
+    ...existing,
+    ...data,
+    sku: data.sku || existing.sku || data.barcode,
+    unit,
+    updatedAt: new Date().toISOString(),
+  }
 
   try {
     await db.variants.put(updated)
   } catch (err) {
     if (err.name === 'ConstraintError') {
-      throw new AppError(
-        'DUPLICATE_BARCODE',
-        'Barcode, SKU or size already exists',
-      )
+      throw new AppError('DUPLICATE_BARCODE', 'That barcode is already used')
     }
     throw err
   }
   return updated
 }
 
+// An archived entry can no longer be sold. Its history stays.
+export async function archiveVariant(id) {
+  const existing = await db.variants.get(id)
+  if (!existing) throw new AppError('NOT_FOUND', 'Variant not found')
+  await db.variants.update(id, {
+    status: 'archived',
+    updatedAt: new Date().toISOString(),
+  })
+}
+
 // The ONLY way stock changes. Stock update + movement record happen together.
-// Call it inside a bigger db.transaction (Phase 6 sales) and it joins that one.
+// Call it inside a bigger db.transaction (sales) and it joins that one.
 export async function adjustStock({
   variantId,
   quantityChange,
@@ -161,7 +201,7 @@ export async function adjustStock({
       if (newStock < 0 && !allowNegativeStock) {
         throw new AppError(
           'NEGATIVE_STOCK',
-          `Only ${variant.currentStock} in stock for ${variant.sku}`,
+          `Only ${showQuantity(variant, variant.currentStock)} in stock for ${variant.sku || variant.barcode}`,
         )
       }
 
@@ -185,21 +225,14 @@ export async function adjustStock({
   )
 }
 
-const BARCODE_PREFIX = 'CLO'
-
 // Creates the next unused internal barcode, e.g. CLO000001.
 // This is an internal code for your own shop, not a GS1 EAN.
-// Gaps in the numbers are fine (pressing Generate without saving uses a number).
+// Gaps in the numbers are fine.
 export async function generateBarcode() {
-  return db.transaction('rw', db.settings, db.variants, async () => {
-    const row = await db.settings.get('barcodeCounter')
-    let counter = row?.value ?? 0
-    let code
-    do {
-      counter += 1
-      code = `${BARCODE_PREFIX}${String(counter).padStart(6, '0')}`
-    } while (await db.variants.where('barcode').equals(code).first())
-    await db.settings.put({ key: 'barcodeCounter', value: counter })
-    return code
-  })
+  return db.transaction(
+    'rw',
+    db.settings,
+    db.variants,
+    async () => (await takeBarcodes(1))[0],
+  )
 }

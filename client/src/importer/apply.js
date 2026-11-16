@@ -1,21 +1,26 @@
 import { db } from '../db/db'
+import { takeBarcodes } from '../db/variantRepo'
 import { isStorageFull } from '../lib/storageErrors'
 import { AppError } from '../lib/errors'
 import { newId } from '../lib/id'
-
-const BARCODE_PREFIX = 'CLO'
+import { addImportRecord } from './importLog'
 
 // Saves a checked plan. Everything is saved in ONE transaction: if anything fails,
-// nothing is saved. Stock is only ever created as an "opening" stock record.
-export async function applyImport(plan) {
+// nothing is saved. Every row becomes its own entry with its own automatic barcode
+// and an "opening" stock record.
+export async function applyImport(
+  plan,
+  { fingerprint = null, fileName = '' } = {},
+) {
   const ready = plan.ready
-  const empty = {
-    productsCreated: 0,
-    variantsCreated: 0,
-    addedToExisting: 0,
-    barcodesGenerated: 0,
+  if (ready.length === 0) {
+    return {
+      productsCreated: 0,
+      entriesCreated: 0,
+      addedToExisting: 0,
+      entries: [],
+    }
   }
-  if (ready.length === 0) return empty
 
   const now = new Date().toISOString()
   const groups = new Map()
@@ -32,105 +37,103 @@ export async function applyImport(plan) {
       db.stockMovements,
       db.settings,
       async () => {
-        // 1. One new product for each new name + category + brand.
+        // 1. One product for each name + company + category (new, or the one that exists).
         const productIds = new Map()
-        const newProducts = []
+        let productsCreated = 0
         for (const [key, items] of groups) {
           const first = items[0]
           if (first.existingProductId) {
+            if (!(await db.products.get(first.existingProductId))) {
+              throw new AppError(
+                'IMPORT_FAILED',
+                'Nothing was imported: a product in the file was removed meanwhile. Please upload the file again.',
+              )
+            }
             productIds.set(key, first.existingProductId)
             continue
           }
           const id = newId()
           productIds.set(key, id)
-          newProducts.push({
+          productsCreated += 1
+          await db.products.add({
             id,
             name: first.product.name,
             category: first.product.category,
             brand: first.product.brand,
-            supplier: first.product.supplier,
+            supplier: '',
             discountAllowed: items.every((i) => i.discountAllowed),
             status: 'active',
             createdAt: now,
             updatedAt: now,
           })
         }
-        if (newProducts.length > 0) await db.products.bulkAdd(newProducts)
 
-        // 2. Internal barcodes (CLO000001...) for rows that came without one.
-        const used = new Set(
-          ready.map((r) => r.variant.barcode).filter(Boolean),
-        )
-        const counterRow = await db.settings.get('barcodeCounter')
-        let counter = counterRow?.value ?? 0
-        let generated = 0
-        const nextBarcode = async () => {
-          for (;;) {
-            counter += 1
-            const code = `${BARCODE_PREFIX}${String(counter).padStart(6, '0')}`
-            if (used.has(code)) continue
-            if (await db.variants.where('barcode').equals(code).first())
-              continue
-            used.add(code)
-            generated += 1
-            return code
-          }
-        }
+        // 2. One automatic barcode for each row, in the order of the file.
+        const barcodes = await takeBarcodes(ready.length)
 
-        // 3. The items (one product + one size each) and their opening stock records.
+        // 3. The entries and their opening stock records.
         const variants = []
         const movements = []
-        for (const item of ready) {
+        ready.forEach((item, index) => {
           const v = item.variant
           const id = newId()
-          const barcode = v.barcode ?? (await nextBarcode())
           variants.push({
             id,
             productId: productIds.get(item.key),
-            sku: v.sku,
-            barcode,
+            barcode: barcodes[index],
+            sku: barcodes[index],
             size: v.size,
+            unit: 'piece',
             costPaise: v.costPaise,
             mrpPaise: v.mrpPaise,
             sellingPricePaise: v.sellingPricePaise,
             taxRatePercent: v.taxRatePercent,
             priceIncludesTax: v.priceIncludesTax,
-            currentStock: v.openingStock,
-            reorderThreshold: v.reorderThreshold,
+            currentStock: v.quantity,
+            reorderThreshold: 3,
             status: 'active',
             createdAt: now,
             updatedAt: now,
           })
-          if (v.openingStock > 0) {
-            movements.push({
-              id: newId(),
-              variantId: id,
-              type: 'opening',
-              quantityChange: v.openingStock,
-              stockAfter: v.openingStock,
-              reason: 'Opening stock (import)',
-              referenceId: null,
-              createdAt: now,
-            })
-          }
-        }
+          movements.push({
+            id: newId(),
+            variantId: id,
+            type: 'opening',
+            quantityChange: v.quantity,
+            stockAfter: v.quantity,
+            reason: 'Stock entry (import)',
+            referenceId: null,
+            createdAt: now,
+          })
+        })
         await db.variants.bulkAdd(variants)
-        if (movements.length > 0) await db.stockMovements.bulkAdd(movements)
-        await db.settings.put({ key: 'barcodeCounter', value: counter })
+        await db.stockMovements.bulkAdd(movements)
+
+        // 4. Remember the file, so importing it again can be warned about.
+        if (fingerprint) {
+          await addImportRecord({
+            fingerprint,
+            fileName,
+            importedAt: now,
+            entries: variants.length,
+            pieces: variants.reduce((total, v) => total + v.currentStock, 0),
+          })
+        }
 
         return {
-          productsCreated: newProducts.length,
-          variantsCreated: variants.length,
+          productsCreated,
+          entriesCreated: variants.length,
           addedToExisting: new Set(
             ready
               .filter((r) => r.existingProductId)
               .map((r) => r.existingProductId),
           ).size,
-          barcodesGenerated: generated,
+          entries: variants.map((v) => ({ id: v.id, stock: v.currentStock })),
         }
       },
     )
   } catch (err) {
+    if (err instanceof AppError) throw err
     console.error(err)
     if (isStorageFull(err)) {
       throw new AppError(
@@ -140,7 +143,7 @@ export async function applyImport(plan) {
     }
     throw new AppError(
       'IMPORT_FAILED',
-      'Nothing was imported because something changed while saving (for example a barcode or SKU was used meanwhile). Please upload the file again.',
+      'Nothing was imported because something went wrong while saving. Please upload the file again.',
     )
   }
 }

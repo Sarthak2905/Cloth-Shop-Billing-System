@@ -1,5 +1,6 @@
 import { db } from '../db/db'
 import { createProduct } from '../db/productRepo'
+import { addStockEntries } from '../db/stockEntryRepo'
 import { createVariant, generateBarcode } from '../db/variantRepo'
 import { collectPending } from '../sync/collect'
 import { applyImport } from './apply'
@@ -7,147 +8,165 @@ import { planImport } from './plan'
 
 const HEAD = [
   'Product Name',
-  'Category',
-  'Brand',
-  'Supplier',
   'Size',
-  'SKU',
-  'Barcode',
-  'Cost Price',
-  'MRP',
+  'Quantity',
+  'Cost',
   'Selling Price',
+  'Company',
+  'Category',
+  'MRP',
   'Tax %',
   'Price Includes Tax',
-  'Opening Stock',
-  'Low Stock Alert',
   'Allow Discount',
 ]
 const row = (over = {}) => {
   const merged = {
     'Product Name': "Men's Casual Shirt",
-    Category: 'Shirts',
     Size: 'M',
+    Quantity: 10,
     'Selling Price': 599,
     ...over,
   }
   return HEAD.map((h) => merged[h] ?? '')
 }
-const plan = (rows, existing = { products: [], variants: [] }) =>
+const plan = (rows, existing = { products: [] }) =>
   planImport([HEAD, ...rows], existing)
-
-const variantData = (productId, over = {}) => ({
-  productId,
-  size: 'M',
-  sku: 'SKU-X',
-  barcode: 'BC-0001',
-  costPaise: 0,
-  mrpPaise: 59900,
-  sellingPricePaise: 59900,
-  taxRatePercent: 5,
-  priceIncludesTax: true,
-  openingStock: 0,
-  reorderThreshold: 3,
-  ...over,
-})
 
 beforeEach(async () => {
   await Promise.all(db.tables.map((t) => t.clear()))
 })
 
-test('saves products, items and opening stock records together', async () => {
+test('saves products, entries and stock records together, each entry with its own barcode', async () => {
   const result = await applyImport(
     plan([
-      row({ Size: 'M', 'Opening Stock': 10 }),
-      row({ Size: 'L', 'Opening Stock': 0 }),
-      row({ 'Product Name': 'Denim Jeans', Category: 'Jeans', Size: '32', 'Opening Stock': 5, 'Allow Discount': 'No' }),
+      row({ Size: 'M', Quantity: 10 }),
+      row({ Size: 'M', Quantity: 6, Cost: 330, 'Selling Price': 629 }),
+      row({
+        'Product Name': 'Denim Jeans',
+        Category: 'Jeans',
+        Size: '32',
+        Quantity: 5,
+        'Allow Discount': 'No',
+      }),
     ]),
   )
 
-  expect(result).toMatchObject({ productsCreated: 2, variantsCreated: 3, barcodesGenerated: 3 })
+  expect(result).toMatchObject({
+    productsCreated: 2,
+    entriesCreated: 3,
+    addedToExisting: 0,
+  })
+  expect(result.entries).toHaveLength(3)
   expect(await db.products.count()).toBe(2)
-  expect(await db.variants.count()).toBe(3)
-  expect(await db.stockMovements.count()).toBe(2) // none for the item with no stock
+  expect(await db.stockMovements.count()).toBe(3)
+
+  const variants = (await db.variants.toArray()).sort((a, b) =>
+    a.barcode.localeCompare(b.barcode),
+  )
+  expect(variants.map((v) => v.barcode)).toEqual([
+    'CLO000001',
+    'CLO000002',
+    'CLO000003',
+  ])
+  expect(variants.map((v) => v.sku)).toEqual([
+    'CLO000001',
+    'CLO000002',
+    'CLO000003',
+  ])
+  expect(variants.map((v) => v.currentStock)).toEqual([10, 6, 5])
+  expect(variants[1].sellingPricePaise).toBe(62900)
 
   const products = await db.products.toArray()
-  const jeans = products.find((p) => p.name === 'Denim Jeans')
-  const shirt = products.find((p) => p.name === "Men's Casual Shirt")
-  expect(jeans.discountAllowed).toBe(false)
-  expect(shirt.discountAllowed).toBe(true)
-
-  const shirtM = (await db.variants.toArray()).find((v) => v.size === 'M')
-  expect(shirtM.currentStock).toBe(10)
-  const movements = await db.stockMovements.toArray()
-  const movement = movements.find((m) => m.variantId === shirtM.id)
-  expect(movement).toMatchObject({ type: 'opening', quantityChange: 10, stockAfter: 10 })
+  expect(products.find((p) => p.name === 'Denim Jeans').discountAllowed).toBe(
+    false,
+  )
+  expect(
+    products.find((p) => p.name === "Men's Casual Shirt").discountAllowed,
+  ).toBe(true)
+  const movement = (await db.stockMovements.toArray())[0]
+  expect(movement).toMatchObject({
+    type: 'opening',
+    reason: 'Stock entry (import)',
+  })
 })
 
+test('barcodes skip numbers already used, and the counter moves on', async () => {
+  const product = await createProduct({ name: 'Old' })
+  await createVariant({
+    productId: product.id,
+    size: 'M',
+    barcode: 'CLO000002',
+    costPaise: 0,
+    mrpPaise: 100,
+    sellingPricePaise: 100,
+    openingStock: 1,
+  })
 
-test('internal barcodes are created in order, skip used ones, and the counter moves on', async () => {
-  const result = await applyImport(
-    plan([
-      row({ Size: 'S' }),
-      row({ Size: 'M', Barcode: 'CLO000002' }),
-      row({ Size: 'L' }),
-    ]),
-  )
+  await applyImport(plan([row({ Size: 'S' }), row({ Size: 'L' })]))
 
   const barcodes = (await db.variants.toArray()).map((v) => v.barcode).sort()
   expect(barcodes).toEqual(['CLO000001', 'CLO000002', 'CLO000003'])
-  expect(result.barcodesGenerated).toBe(2)
   expect(await generateBarcode()).toBe('CLO000004')
 })
 
-test('a new size is added to an existing product without creating a second product', async () => {
-  const product = await createProduct({
+test('a new entry for an existing product is added to that product, not to a second one', async () => {
+  await addStockEntries({
     name: "Men's Casual Shirt",
-    category: 'Shirts',
+    rows: [{ size: 'M', quantity: 1, sellingPricePaise: 100 }],
   })
-  await createVariant(
-    variantData(product.id, { size: 'M', sku: 'OLD-M', barcode: 'BC-0001' }),
-  )
-  const existing = {
-    products: await db.products.toArray(),
-    variants: await db.variants.toArray(),
-  }
+  const existing = { products: await db.products.toArray() }
 
-  const result = await applyImport(plan([row({ Size: 'L' })], existing))
+  const result = await applyImport(plan([row({ Size: 'M' })], existing))
 
   expect(result).toMatchObject({
     productsCreated: 0,
-    variantsCreated: 1,
+    entriesCreated: 1,
     addedToExisting: 1,
   })
   expect(await db.products.count()).toBe(1)
-  expect(await db.variants.where('productId').equals(product.id).count()).toBe(
-    2,
-  )
+  expect(await db.variants.count()).toBe(2)
 })
 
-test('if saving fails, nothing at all is saved', async () => {
-  const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
-  const checked = plan([row({ Size: 'M', Barcode: 'BC-1234', SKU: 'SKU-A' })])
+test('importing the same rows twice adds the stock twice (duplicates are allowed)', async () => {
+  const rows = [
+    row({ Size: 'M', Quantity: 10 }),
+    row({ Size: 'L', Quantity: 5 }),
+  ]
 
-  // Someone uses the same barcode after the file was checked.
-  const other = await createProduct({ name: 'Other', category: 'Misc' })
-  await createVariant(
-    variantData(other.id, { sku: 'SKU-B', barcode: 'BC-1234' }),
-  )
+  await applyImport(plan(rows))
+  await applyImport(plan(rows, { products: await db.products.toArray() }))
+
+  expect(await db.products.count()).toBe(1)
+  const variants = await db.variants.toArray()
+  expect(variants).toHaveLength(4)
+  expect(variants.reduce((total, v) => total + v.currentStock, 0)).toBe(30)
+})
+
+test('if saving fails halfway, nothing at all is saved', async () => {
+  const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+  const checked = plan([row({ 'Product Name': 'Shirt A' })])
+  // a second entry that points at a product which does not exist
+  checked.ready.push({
+    ...checked.ready[0],
+    key: 'ghost',
+    existingProductId: 'missing',
+    product: { name: 'Ghost', category: '', brand: '' },
+  })
 
   await expect(applyImport(checked)).rejects.toMatchObject({
     code: 'IMPORT_FAILED',
   })
 
-  expect(await db.products.count()).toBe(1)
-  expect(await db.variants.count()).toBe(1)
+  expect(await db.products.count()).toBe(0)
+  expect(await db.variants.count()).toBe(0)
+  expect(await db.stockMovements.count()).toBe(0)
+  expect(await db.settings.get('barcodeCounter')).toBeUndefined()
   spy.mockRestore()
 })
 
-test('imported items are picked up by the sync queue', async () => {
+test('imported entries are picked up by the sync queue', async () => {
   await applyImport(
-    plan([
-      row({ Size: 'M', 'Opening Stock': 4 }),
-      row({ Size: 'L', 'Opening Stock': 6 }),
-    ]),
+    plan([row({ Size: 'M', Quantity: 4 }), row({ Size: 'L', Quantity: 6 })]),
   )
 
   const ops = await collectPending()

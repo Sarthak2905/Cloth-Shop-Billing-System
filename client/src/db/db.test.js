@@ -108,31 +108,6 @@ describe('variants', () => {
     )
   })
 
-  test('rejects a duplicate SKU', async () => {
-    const p = await createProduct(shirt)
-    await createVariant(variantInput(p.id))
-    await expectCode(
-      createVariant(variantInput(p.id, { barcode: 'CLO000009', size: 'L' })),
-      'DUPLICATE_SKU',
-    )
-  })
-
-  test('rejects the same size and colour twice for one product', async () => {
-    const p = await createProduct(shirt)
-    await createVariant(variantInput(p.id))
-    await expectCode(
-      createVariant(variantInput(p.id, { sku: 'X-2', barcode: 'CLO000003' })),
-      'DUPLICATE_VARIANT',
-    )
-  })
-
-  test('rejects a selling price above MRP', async () => {
-    const p = await createProduct(shirt)
-    await expectCode(
-      createVariant(variantInput(p.id, { sellingPricePaise: 90000 })),
-      'VALIDATION_ERROR',
-    )
-  })
 
   test('returns undefined for an unknown barcode', async () => {
     expect(await getVariantByBarcode('NOPE1234')).toBeUndefined()

@@ -19,3 +19,9 @@ db.version(1).stores({
 db.version(2).stores({
   printJobs: 'id, saleId, status, createdAt',
 })
+
+// Version 3: stock entries. The same product and size can now be entered any number
+// of times, so SKU and "product + size" are no longer unique. Only the barcode is.
+db.version(3).stores({
+  variants: 'id, productId, &barcode, sku, [productId+size], status, createdAt',
+})

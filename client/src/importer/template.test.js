@@ -9,14 +9,17 @@ test('the sample file has a UTF-8 marker and all the headings', () => {
   expect(parseCsv(text)[0]).toEqual(TEMPLATE_HEADERS)
 })
 
-test('the sample file is itself a valid import', () => {
-  const plan = planImport(parseCsv(buildTemplateCsv()), {
-    products: [],
-    variants: [],
-  })
+test('the sample file is itself a valid import, with the same product and size twice', () => {
+  const plan = planImport(parseCsv(buildTemplateCsv()), { products: [] })
 
   expect(plan.fatal).toBeNull()
   expect(plan.problems).toEqual([])
-  expect(plan.ready).toHaveLength(4)
+  expect(plan.ignoredColumns).toEqual([])
+  expect(plan.ready).toHaveLength(5)
   expect(plan.summary.newProducts).toBe(3)
+  expect(
+    plan.ready.filter(
+      (r) => r.variant.size === 'M' && r.product.name === "Men's Casual Shirt",
+    ),
+  ).toHaveLength(2)
 })

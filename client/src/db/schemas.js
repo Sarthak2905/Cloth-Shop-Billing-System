@@ -2,25 +2,33 @@ import { z } from 'zod'
 import { AppError } from '../lib/errors.js'
 
 const text = (max) => z.string().trim().min(1, 'Required').max(max)
+const optionalText = (max) => z.string().trim().max(max)
 
 export const productInputSchema = z.object({
   name: text(120),
-  category: text(60),
-  brand: z.string().trim().max(60),
-  supplier: z.string().trim().max(120),
+  // company, category and supplier are optional
+  category: optionalText(60).default(''),
+  brand: optionalText(60).default(''),
+  supplier: optionalText(120).default(''),
   // optional, so products saved before this setting existed can still be edited
   discountAllowed: z.boolean().optional(),
 })
 
+const barcodeField = z
+  .string()
+  .trim()
+  .min(4, 'Barcode too short')
+  .max(48)
+  .regex(/^[A-Za-z0-9\-_.]+$/, 'Barcode has invalid characters')
+
 const variantFields = {
-  sku: text(40),
-  barcode: z
-    .string()
-    .trim()
-    .min(4, 'Barcode too short')
-    .max(48)
-    .regex(/^[A-Za-z0-9\-_.]+$/, 'Barcode has invalid characters'),
-  size: text(20),
+  // Hidden. A new entry keeps it equal to its barcode, so older code and the server
+  // keep working. Nobody types it any more.
+  sku: optionalText(48).optional(),
+  barcode: barcodeField,
+  // Any text, even empty: "M", "32", "2-3 years", "Free size"
+  size: optionalText(50).default(''),
+  unit: z.enum(['piece', 'meter']).default('piece'),
   costPaise: z.number().int().nonnegative(),
   mrpPaise: z.number().int().nonnegative(),
   sellingPricePaise: z.number().int().nonnegative(),
@@ -29,21 +37,16 @@ const variantFields = {
   reorderThreshold: z.number().int().nonnegative(),
 }
 
-const priceRule = [
-  (d) => d.sellingPricePaise <= d.mrpPaise,
-  { message: 'Selling price cannot exceed MRP', path: ['sellingPricePaise'] },
-]
-
-export const variantCreateSchema = z
-  .object({
-    ...variantFields,
-    productId: z.string().min(1),
-    openingStock: z.number().int().nonnegative(),
-  })
-  .refine(...priceRule)
+export const variantCreateSchema = z.object({
+  ...variantFields,
+  // empty means "make one automatically"
+  barcode: barcodeField.optional(),
+  productId: z.string().min(1),
+  openingStock: z.number().int().nonnegative(),
+})
 
 // Used for edits. Stock is NOT editable here; stock only changes via adjustStock.
-export const variantEditSchema = z.object(variantFields).refine(...priceRule)
+export const variantEditSchema = z.object(variantFields)
 
 export const settingsSchema = z.object({
   shopName: text(80),

@@ -1,16 +1,15 @@
 // The columns of the import file. Headings are matched ignoring capitals, spaces
 // and punctuation, so "Selling Price", "selling_price" and "SELLING PRICE" all work.
+// SKU and Barcode are not columns any more: they are listed as "ignored".
 const ALIASES = {
   productName: ['productname', 'product', 'name', 'itemname', 'item'],
-  category: ['category', 'type', 'group'],
-  brand: ['brand'],
-  supplier: ['supplier', 'vendor'],
   size: ['size'],
-  sku: ['sku', 'itemcode', 'code'],
-  barcode: ['barcode', 'barcodenumber'],
-  costPrice: ['costprice', 'cost', 'purchaseprice'],
-  mrp: ['mrp', 'maximumretailprice'],
+  quantity: ['quantity', 'qty', 'openingstock', 'stock', 'currentstock'],
+  costPrice: ['cost', 'costprice', 'purchaseprice'],
   sellingPrice: ['sellingprice', 'saleprice', 'price', 'sp'],
+  brand: ['company', 'brand', 'companyname'],
+  category: ['category', 'type', 'group'],
+  mrp: ['mrp', 'maximumretailprice'],
   tax: ['tax%', 'tax', 'taxpercent', 'gst%', 'gst', 'gstpercent'],
   priceIncludesTax: [
     'priceincludestax',
@@ -18,21 +17,12 @@ const ALIASES = {
     'taxincluded',
     'inclusiveoftax',
   ],
-  openingStock: ['openingstock', 'stock', 'quantity', 'qty', 'currentstock'],
-  lowStockAlert: [
-    'lowstockalert',
-    'lowstock',
-    'reorderlevel',
-    'minimumstock',
-    'minstock',
-  ],
   allowDiscount: ['allowdiscount', 'discountallowed', 'discount'],
 }
 
 export const REQUIRED = [
   { field: 'productName', label: 'Product Name' },
-  { field: 'category', label: 'Category' },
-  { field: 'size', label: 'Size' },
+  { field: 'quantity', label: 'Quantity' },
   { field: 'sellingPrice', label: 'Selling Price' },
 ]
 
@@ -47,6 +37,7 @@ const normalize = (cell) =>
     .replace(/[^a-z0-9%]/g, '')
 
 // Returns where each column is: { columns: { productName: 0, ... }, missing: [...], unknown: [...] }
+// `unknown` = headings that are not used (they are simply ignored).
 export function mapHeaders(headerRow) {
   const columns = {}
   const unknown = []

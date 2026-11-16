@@ -4,7 +4,7 @@ import BillingPage from './pages/BillingPage'
 import SalesPage from './pages/SalesPage'
 import SaleDetailPage from './pages/SaleDetailPage'
 import ProductsPage from './pages/ProductsPage'
-import NewProductPage from './pages/NewProductPage'
+import AddStockPage from './pages/AddStockPage'
 import ProductDetailPage from './pages/ProductDetailPage'
 import LabelsPage from './pages/LabelsPage'
 import SettingsPage from './pages/SettingsPage'
@@ -23,7 +23,8 @@ export default function App() {
         <Route path="/sales" element={<SalesPage />} />
         <Route path="/sales/:id" element={<SaleDetailPage />} />
         <Route path="/products" element={<ProductsPage />} />
-        <Route path="/products/new" element={<NewProductPage />} />
+        <Route path="/stock/new" element={<AddStockPage />} />
+        <Route path="/products/new" element={<AddStockPage />} />
         <Route path="/products/:id" element={<ProductDetailPage />} />
         <Route path="/labels" element={<LabelsPage />} />
         <Route path="/settings" element={<SettingsPage />} />
@@ -31,8 +32,8 @@ export default function App() {
         <Route path="/backup" element={<BackupPage />} />
         <Route path="/storage" element={<StoragePage />} />
         <Route path="/scanner" element={<ScannerTestPage />} />
-        <Route path="*" element={<p>Page not found</p>} />
         <Route path="/import" element={<ImportPage />} />
+        <Route path="*" element={<p>Page not found</p>} />
       </Route>
     </Routes>
   )

@@ -1,33 +1,13 @@
-import { paiseToRupees, rupeesToPaise } from '../lib/money.js'
+import { productKey } from '../lib/productKey.js'
 import { mapHeaders } from './columns.js'
 
 const MAX_PAISE = 100_000_000 // 10 lakh rupees
+const MAX_ROWS = 5000
 const DEFAULT_TAX_PERCENT = 5
-const DEFAULT_LOW_STOCK = 3
-export const BARCODE_PATTERN = /^[A-Za-z0-9\-_.]{4,48}$/
 
 const isBlank = (value) =>
   value === null || value === undefined || String(value).trim() === ''
 const text = (value) => (isBlank(value) ? '' : String(value).trim())
-const squash = (value) =>
-  String(value ?? '')
-    .trim()
-    .replace(/\s+/g, ' ')
-    .toLowerCase()
-export const productKey = (name, category, brand) =>
-  [squash(name), squash(category), squash(brand)].join('|')
-
-export function makeSkuBase(name, size) {
-  const letters =
-    String(name)
-      .toUpperCase()
-      .replace(/[^A-Z0-9]/g, '')
-      .slice(0, 8) || 'ITEM'
-  const sizePart = String(size)
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, '')
-  return sizePart ? `${letters}-${sizePart}` : letters
-}
 
 // Money: returns paise, null when blank, or undefined after pushing an error.
 function parseMoney(value, label, errors) {
@@ -48,12 +28,12 @@ function parseMoney(value, label, errors) {
     const cleaned = String(value)
       .replace(/₹|,|\s/g, '')
       .replace(/^rs\.?/i, '')
-    try {
-      paise = rupeesToPaise(cleaned)
-    } catch {
+    if (!/^\d+(\.\d{1,2})?$/.test(cleaned)) {
       errors.push(`${label} must be a number like 599 or 599.50`)
       return undefined
     }
+    const [rupees, paiseText = ''] = cleaned.split('.')
+    paise = Number(rupees) * 100 + Number(paiseText.padEnd(2, '0'))
   }
   if (paise > MAX_PAISE) {
     errors.push(`${label} is too large`)
@@ -62,12 +42,15 @@ function parseMoney(value, label, errors) {
   return paise
 }
 
-function parseWhole(value, label, errors, fallback) {
-  if (isBlank(value)) return fallback
+function parseQuantity(value, errors) {
+  if (isBlank(value)) {
+    errors.push('Quantity is empty')
+    return 0
+  }
   const n = typeof value === 'number' ? value : Number(String(value).trim())
-  if (!Number.isInteger(n) || n < 0 || n > 1_000_000) {
-    errors.push(`${label} must be a whole number (0 or more)`)
-    return fallback
+  if (!Number.isInteger(n) || n < 1 || n > 1_000_000) {
+    errors.push('Quantity must be a whole number, 1 or more')
+    return 0
   }
   return n
 }
@@ -104,55 +87,55 @@ function parseYesNo(value, label, errors, fallback) {
   return fallback
 }
 
-function emptyPlan(fatal, rowsRead = 0) {
+function emptyPlan(fatal, ignoredColumns = []) {
   return {
     fatal,
+    ignoredColumns,
     ready: [],
-    skippedExisting: [],
     problems: [],
     summary: {
-      rowsRead,
+      rowsRead: 0,
       ready: 0,
+      pieces: 0,
       newProducts: 0,
       addedToExisting: 0,
-      skippedExisting: 0,
       problems: 0,
     },
   }
 }
 
 // Checks every row of the file BEFORE anything is saved. Nothing here touches the
-// database: `existing` is a snapshot ({ products, variants }) passed in.
-export function planImport(rows, existing = { products: [], variants: [] }) {
+// database: `existing` is a snapshot ({ products }) passed in.
+// Every row is its own stock entry. The same product and size may appear any number
+// of times: nothing is skipped or refused for being a repeat.
+export function planImport(rows, existing = { products: [] }) {
   const headerIndex = rows.findIndex((r) => r.some((cell) => !isBlank(cell)))
   if (headerIndex === -1) return emptyPlan('The file is empty.')
 
-  const { columns, missing } = mapHeaders(rows[headerIndex])
+  const { columns, missing, unknown } = mapHeaders(rows[headerIndex])
   if (missing.length > 0) {
     return emptyPlan(
       `Missing column${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}. The first row of the sheet must contain the column headings.`,
+      unknown,
+    )
+  }
+  if (rows.length - headerIndex - 1 > MAX_ROWS) {
+    return emptyPlan(
+      `The file has more than ${MAX_ROWS.toLocaleString('en-US')} rows. Please split it into smaller files.`,
+      unknown,
     )
   }
 
-  const productByKey = new Map(
-    existing.products.map((p) => [productKey(p.name, p.category, p.brand), p]),
-  )
-  const sizesByProduct = new Map()
-  const barcodeOwner = new Map()
-  const skuTaken = new Set()
-  for (const v of existing.variants) {
-    if (!sizesByProduct.has(v.productId))
-      sizesByProduct.set(v.productId, new Set())
-    sizesByProduct.get(v.productId).add(squash(v.size))
-    if (v.barcode) barcodeOwner.set(v.barcode, v.sku)
-    skuTaken.add(v.sku)
+  // Same rule as the Add stock screen: an active product with the same name, company
+  // and category is reused; otherwise a new product is made.
+  const productByKey = new Map()
+  for (const p of existing.products) {
+    if (p.status === 'archived') continue
+    const key = productKey(p.name, p.category, p.brand)
+    if (!productByKey.has(key)) productByKey.set(key, p)
   }
 
-  const seenSizes = new Map()
-  const fileBarcodes = new Map()
-  const fileSkus = new Map()
   const ready = []
-  const skippedExisting = []
   const problems = []
   let rowsRead = 0
 
@@ -181,32 +164,16 @@ export function planImport(rows, existing = { products: [], variants: [] }) {
     }
 
     const name = str('productName', 'Product Name', 120, true)
-    const category = str('category', 'Category', 60, true)
-    const brand = str('brand', 'Brand', 60, false)
-    const supplier = str('supplier', 'Supplier', 120, false)
-    const size = str('size', 'Size', 20, true)
-    let sku = str('sku', 'SKU', 40, false)
-    const barcode = str('barcode', 'Barcode', 48, false)
-    if (barcode && !BARCODE_PATTERN.test(barcode)) {
-      errors.push(
-        'Barcode may only contain letters, numbers, - _ . and must be 4 to 48 characters',
-      )
-    }
+    const size = str('size', 'Size', 50, false)
+    const brand = str('brand', 'Company', 60, false)
+    const category = str('category', 'Category', 60, false)
+    const quantity = parseQuantity(get('quantity'), errors)
 
     const selling = parseMoney(get('sellingPrice'), 'Selling Price', errors)
     if (selling === null) errors.push('Selling Price is empty')
+    const cost = parseMoney(get('costPrice'), 'Cost', errors)
     let mrp = parseMoney(get('mrp'), 'MRP', errors)
-    const cost = parseMoney(get('costPrice'), 'Cost Price', errors)
     if (mrp === null && typeof selling === 'number') mrp = selling
-    if (
-      typeof selling === 'number' &&
-      typeof mrp === 'number' &&
-      selling > mrp
-    ) {
-      errors.push(
-        `Selling Price (${paiseToRupees(selling)}) is more than MRP (${paiseToRupees(mrp)})`,
-      )
-    }
 
     const tax = parseTax(get('tax'), errors)
     const priceIncludesTax = parseYesNo(
@@ -215,18 +182,6 @@ export function planImport(rows, existing = { products: [], variants: [] }) {
       errors,
       true,
     )
-    const openingStock = parseWhole(
-      get('openingStock'),
-      'Opening Stock',
-      errors,
-      0,
-    )
-    const reorderThreshold = parseWhole(
-      get('lowStockAlert'),
-      'Low Stock Alert',
-      errors,
-      DEFAULT_LOW_STOCK,
-    )
     const discountAllowed = parseYesNo(
       get('allowDiscount'),
       'Allow Discount',
@@ -234,90 +189,32 @@ export function planImport(rows, existing = { products: [], variants: [] }) {
       true,
     )
 
-    const fail = () =>
+    if (errors.length > 0) {
       problems.push({
         row: rowNumber,
         name: name || '(no name)',
         message: errors.join('. '),
       })
-    if (errors.length > 0) {
-      fail()
       continue
     }
 
     const key = productKey(name, category, brand)
     const existingProduct = productByKey.get(key) ?? null
-    const sizeKey = squash(size)
-
-    if (existingProduct?.status === 'archived') {
-      errors.push(
-        'This product exists but is archived. Restore it or change its name first',
-      )
-      fail()
-      continue
-    }
-    if (
-      existingProduct &&
-      sizesByProduct.get(existingProduct.id)?.has(sizeKey)
-    ) {
-      skippedExisting.push({ row: rowNumber, name, size })
-      continue
-    }
-
-    const sizeId = `${key}|${sizeKey}`
-    if (seenSizes.has(sizeId))
-      errors.push(`Same product and size as row ${seenSizes.get(sizeId)}`)
-    if (barcode) {
-      if (barcodeOwner.has(barcode)) {
-        errors.push(
-          `Barcode ${barcode} is already used by ${barcodeOwner.get(barcode)}`,
-        )
-      } else if (fileBarcodes.has(barcode)) {
-        errors.push(`Same barcode as row ${fileBarcodes.get(barcode)}`)
-      }
-    }
-    if (sku) {
-      if (skuTaken.has(sku)) errors.push(`SKU "${sku}" is already used`)
-      else if (fileSkus.has(sku))
-        errors.push(`Same SKU as row ${fileSkus.get(sku)}`)
-    }
-    if (errors.length > 0) {
-      fail()
-      continue
-    }
-
-    if (!sku) {
-      const base = makeSkuBase(name, size)
-      let candidate = base
-      let n = 1
-      while (skuTaken.has(candidate) || fileSkus.has(candidate)) {
-        n += 1
-        candidate = `${base}-${n}`
-      }
-      sku = candidate
-    }
-
-    seenSizes.set(sizeId, rowNumber)
-    fileSkus.set(sku, rowNumber)
-    if (barcode) fileBarcodes.set(barcode, rowNumber)
 
     ready.push({
       row: rowNumber,
       key,
       existingProductId: existingProduct?.id ?? null,
       discountAllowed,
-      product: { name, category, brand, supplier },
+      product: { name, category, brand },
       variant: {
-        sku,
-        barcode: barcode || null,
         size,
+        quantity,
         costPaise: cost ?? 0,
         mrpPaise: mrp,
         sellingPricePaise: selling,
         taxRatePercent: tax,
         priceIncludesTax,
-        reorderThreshold,
-        openingStock,
       },
     })
   }
@@ -331,15 +228,15 @@ export function planImport(rows, existing = { products: [], variants: [] }) {
 
   return {
     fatal: null,
+    ignoredColumns: unknown,
     ready,
-    skippedExisting,
     problems,
     summary: {
       rowsRead,
       ready: ready.length,
+      pieces: ready.reduce((total, r) => total + r.variant.quantity, 0),
       newProducts: newKeys.size,
       addedToExisting: existingIds.size,
-      skippedExisting: skippedExisting.length,
       problems: problems.length,
     },
   }
