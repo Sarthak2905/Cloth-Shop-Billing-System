@@ -9,6 +9,7 @@ import { AppError } from '../lib/errors'
 import { isBlankInput, parseMoneyInput, parseWholeInput } from '../lib/entryInput'
 import { newId } from '../lib/id'
 import { setLabelPreset } from '../lib/labelPreset'
+import { formatMeters, parseLength } from '../lib/quantity'
 import { isStorageFull } from '../lib/storageErrors'
 
 // A new row starts with the cost and prices of the row above it, to save typing.
@@ -21,6 +22,9 @@ const newRow = (from = {}) => ({
     mrp: from.mrp ?? '',
 })
 
+const stockLine = (entry) =>
+    entry.unit === 'meter' ? `${formatMeters(entry.currentStock)} m` : `${entry.currentStock} pcs`
+
 export default function AddStockPage() {
     const location = useLocation()
     const navigate = useNavigate()
@@ -30,12 +34,16 @@ export default function AddStockPage() {
     const [name, setName] = useState(start?.name ?? '')
     const [brand, setBrand] = useState(start?.brand ?? '')
     const [category, setCategory] = useState(start?.category ?? '')
+    const [unit, setUnit] = useState(start?.unit === 'meter' ? 'meter' : 'piece')
     const [tax, setTax] = useState('5')
     const [includesTax, setIncludesTax] = useState(true)
     const [rows, setRows] = useState(() => [newRow()])
     const [errors, setErrors] = useState({ rows: {} })
     const [saving, setSaving] = useState(false)
     const [saved, setSaved] = useState(null)
+
+    const meter = unit === 'meter'
+    const per = meter ? ' per meter' : ''
 
     const setRowField = (key, field) => (e) =>
         setRows((list) => list.map((r) => (r.key === key ? { ...r, [field]: e.target.value } : r)))
@@ -47,6 +55,11 @@ export default function AddStockPage() {
 
     function removeRow(key) {
         setRows((list) => (list.length > 1 ? list.filter((r) => r.key !== key) : list))
+    }
+
+    function handleUnitChange(e) {
+        setUnit(e.target.value)
+        setErrors({ rows: {} })
     }
 
     // Picking a product name you used before fills its company and category.
@@ -77,8 +90,18 @@ export default function AddStockPage() {
             if (isBlankInput(row.size) && isBlankInput(row.quantity)) continue
             const e = {}
             if (row.size.trim().length > 50) e.size = 'Too long (50 characters at most)'
-            const quantity = parseWholeInput(row.quantity)
-            if (quantity === null || quantity < 1) e.quantity = 'Enter the number of pieces (1 or more)'
+
+            // Pieces are whole numbers. Fabric is typed in meters (25.5) or centimetres
+            // (80 cm) and kept as whole centimetres.
+            let quantity
+            if (meter) {
+                quantity = parseLength(row.quantity, 'm')
+                if (quantity === null || quantity < 1) e.quantity = 'Enter meters like 25 or 25.5'
+            } else {
+                quantity = parseWholeInput(row.quantity)
+                if (quantity === null || quantity < 1) e.quantity = 'Enter the number of pieces (1 or more)'
+            }
+
             const sellingPricePaise = parseMoneyInput(row.price)
             if (sellingPricePaise === null) e.price = 'Enter the selling price like 599 or 599.50'
             let costPaise = 0
@@ -117,6 +140,7 @@ export default function AddStockPage() {
                 name,
                 brand,
                 category,
+                unit,
                 taxRatePercent: taxNumber,
                 priceIncludesTax: includesTax,
                 rows: prepared,
@@ -151,8 +175,11 @@ export default function AddStockPage() {
         setSaved(null)
     }
 
+    // One label for each piece; a roll of fabric gets one label.
     function printLabels() {
-        const copies = Object.fromEntries(saved.entries.map((entry) => [entry.id, entry.currentStock]))
+        const copies = Object.fromEntries(
+            saved.entries.map((entry) => [entry.id, entry.unit === 'meter' ? 1 : entry.currentStock]),
+        )
         setLabelPreset(copies)
         navigate('/labels')
     }
@@ -174,8 +201,8 @@ export default function AddStockPage() {
                     <ul className="space-y-1 text-sm text-slate-600">
                         {saved.entries.map((entry) => (
                             <li key={entry.id}>
-                                {entry.size ? `Size ${entry.size}` : 'No size'} · {entry.currentStock} pcs ·{' '}
-                                <span className="font-mono">{entry.barcode}</span>
+                                {entry.size ? `${entry.unit === 'meter' ? '' : 'Size '}${entry.size}` : 'No size'} ·{' '}
+                                {stockLine(entry)} · <span className="font-mono">{entry.barcode}</span>
                             </li>
                         ))}
                     </ul>
@@ -227,6 +254,16 @@ export default function AddStockPage() {
                             <option key={n} value={n} />
                         ))}
                     </datalist>
+                    <FormField
+                        label="Sold by"
+                        htmlFor="as-unit"
+                        hint="Choose Meter for fabric sold by length. Prices are then per meter."
+                    >
+                        <select id="as-unit" className={inputClass} value={unit} onChange={handleUnitChange}>
+                            <option value="piece">Piece</option>
+                            <option value="meter">Meter</option>
+                        </select>
+                    </FormField>
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                         <FormField label="Company / brand (optional)" htmlFor="as-brand" error={errors.brand}>
                             <input id="as-brand" className={inputClass} value={brand}
@@ -276,23 +313,34 @@ export default function AddStockPage() {
                                 )}
                             </div>
                             <div className="grid grid-cols-2 gap-3">
-                                <FormField label="Size" htmlFor={`size-${row.key}`} error={e.size}>
+                                <FormField
+                                    label={meter ? 'Design / shade (optional)' : 'Size'}
+                                    htmlFor={`size-${row.key}`}
+                                    error={e.size}
+                                >
                                     <input id={`size-${row.key}`} className={inputClass} value={row.size}
-                                        onChange={setRowField(row.key, 'size')} placeholder="M, 32, Free size..." />
+                                        onChange={setRowField(row.key, 'size')}
+                                        placeholder={meter ? 'Grey 101' : 'M, 32, Free size...'} />
                                 </FormField>
-                                <FormField label="Quantity" htmlFor={`qty-${row.key}`} error={e.quantity}>
-                                    <input id={`qty-${row.key}`} inputMode="numeric" className={inputClass}
-                                        value={row.quantity} onChange={setRowField(row.key, 'quantity')} />
+                                <FormField
+                                    label={meter ? 'Quantity (meters)' : 'Quantity'}
+                                    hint={meter ? 'In meters, like 25.5. You can also type 80 cm.' : undefined}
+                                    htmlFor={`qty-${row.key}`}
+                                    error={e.quantity}
+                                >
+                                    <input id={`qty-${row.key}`} inputMode={meter ? 'decimal' : 'numeric'}
+                                        className={inputClass} value={row.quantity}
+                                        onChange={setRowField(row.key, 'quantity')} />
                                 </FormField>
-                                <FormField label="Cost (₹)" htmlFor={`cost-${row.key}`} error={e.cost}>
+                                <FormField label={`Cost (₹${per})`} htmlFor={`cost-${row.key}`} error={e.cost}>
                                     <input id={`cost-${row.key}`} inputMode="decimal" className={inputClass}
                                         value={row.cost} onChange={setRowField(row.key, 'cost')} />
                                 </FormField>
-                                <FormField label="Selling price (₹)" htmlFor={`price-${row.key}`} error={e.price}>
+                                <FormField label={`Selling price (₹${per})`} htmlFor={`price-${row.key}`} error={e.price}>
                                     <input id={`price-${row.key}`} inputMode="decimal" className={inputClass}
                                         value={row.price} onChange={setRowField(row.key, 'price')} />
                                 </FormField>
-                                <FormField label="MRP (₹, optional)" htmlFor={`mrp-${row.key}`} error={e.mrp}>
+                                <FormField label={`MRP (₹${per}, optional)`} htmlFor={`mrp-${row.key}`} error={e.mrp}>
                                     <input id={`mrp-${row.key}`} inputMode="decimal" className={inputClass}
                                         value={row.mrp} onChange={setRowField(row.key, 'mrp')} />
                                 </FormField>

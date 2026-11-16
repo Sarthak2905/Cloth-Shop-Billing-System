@@ -5,9 +5,12 @@ import { AppError } from '../lib/errors'
 import { newId } from '../lib/id'
 import { addImportRecord } from './importLog'
 
+// The low-stock alert starts at 3 pieces, or at 3.00 m (300 cm) for fabric.
+const LOW_STOCK = { piece: 3, meter: 300 }
+
 // Saves a checked plan. Everything is saved in ONE transaction: if anything fails,
 // nothing is saved. Every row becomes its own entry with its own automatic barcode
-// and an "opening" stock record.
+// and an "opening" stock record. Fabric quantities are whole centimetres.
 export async function applyImport(
   plan,
   { fingerprint = null, fileName = '' } = {},
@@ -37,7 +40,7 @@ export async function applyImport(
       db.stockMovements,
       db.settings,
       async () => {
-        // 1. One product for each name + company + category (new, or the one that exists).
+        // 1. One product for each name + company + category + unit (new, or the one that exists).
         const productIds = new Map()
         let productsCreated = 0
         for (const [key, items] of groups) {
@@ -83,14 +86,14 @@ export async function applyImport(
             barcode: barcodes[index],
             sku: barcodes[index],
             size: v.size,
-            unit: 'piece',
+            unit: v.unit,
             costPaise: v.costPaise,
             mrpPaise: v.mrpPaise,
             sellingPricePaise: v.sellingPricePaise,
             taxRatePercent: v.taxRatePercent,
             priceIncludesTax: v.priceIncludesTax,
             currentStock: v.quantity,
-            reorderThreshold: 3,
+            reorderThreshold: LOW_STOCK[v.unit],
             status: 'active',
             createdAt: now,
             updatedAt: now,
@@ -111,12 +114,17 @@ export async function applyImport(
 
         // 4. Remember the file, so importing it again can be warned about.
         if (fingerprint) {
+          const sum = (unit) =>
+            variants
+              .filter((v) => v.unit === unit)
+              .reduce((total, v) => total + v.currentStock, 0)
           await addImportRecord({
             fingerprint,
             fileName,
             importedAt: now,
             entries: variants.length,
-            pieces: variants.reduce((total, v) => total + v.currentStock, 0),
+            pieces: sum('piece'),
+            meters: sum('meter'), // centimetres
           })
         }
 
@@ -128,7 +136,11 @@ export async function applyImport(
               .filter((r) => r.existingProductId)
               .map((r) => r.existingProductId),
           ).size,
-          entries: variants.map((v) => ({ id: v.id, stock: v.currentStock })),
+          entries: variants.map((v) => ({
+            id: v.id,
+            stock: v.currentStock,
+            unit: v.unit,
+          })),
         }
       },
     )

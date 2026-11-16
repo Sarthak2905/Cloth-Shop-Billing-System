@@ -1,9 +1,13 @@
-import { calculateTotals, isDiscountEligible } from './calc.js'
+import { calculateTotals, isDiscountEligible, lineGrossPaise } from './calc.js'
+import { formatQuantity, stepFor } from '../lib/quantity.js'
 
 // A cart is plain data: { lines: [...], billDiscount: null | {type, value} }.
 // Every function returns { cart, error }. If error is set, the cart is unchanged.
+// Meter items: quantity and stock are whole CENTIMETRES (235 = 2.35 m).
 
-const MAX_QUANTITY = 9999
+const MAX_PIECES = 9999
+const MAX_METER_CM = 100000 // 1000 m on one line
+const maxFor = (unit) => (unit === 'meter' ? MAX_METER_CM : MAX_PIECES)
 
 export function createCart() {
   return { lines: [], billDiscount: null }
@@ -11,6 +15,7 @@ export function createCart() {
 
 // Copies everything the bill needs, so later product edits do not change it.
 export function lineFromVariant(variant, product) {
+  const unit = variant.unit ?? 'piece'
   return {
     variantId: variant.id,
     productId: product.id,
@@ -18,6 +23,7 @@ export function lineFromVariant(variant, product) {
     sku: variant.sku,
     barcode: variant.barcode,
     size: variant.size,
+    unit,
     unitPricePaise: variant.sellingPricePaise,
     mrpPaise: variant.mrpPaise,
     taxRatePercent: variant.taxRatePercent ?? 0,
@@ -27,7 +33,8 @@ export function lineFromVariant(variant, product) {
     discountAllowed: product.discountAllowed !== false,
     // true when the cashier switched discounts off for this item on this bill
     discountExcluded: false,
-    quantity: 1,
+    // a new piece line starts at 1; a new meter line starts at 1.00 m
+    quantity: stepFor(unit),
     discount: null,
   }
 }
@@ -39,7 +46,7 @@ function stockError(line, quantity, allowNegativeStock) {
   if (allowNegativeStock) return null
   if (line.availableStock <= 0) return 'Out of stock'
   if (quantity > line.availableStock)
-    return `Only ${line.availableStock} in stock`
+    return `Only ${formatQuantity(line.availableStock, line.unit)} in stock`
   return null
 }
 
@@ -54,14 +61,16 @@ function updateLine(cart, variantId, changes) {
 
 export function addItem(cart, newLine, { allowNegativeStock = false } = {}) {
   const existing = cart.lines.find((l) => l.variantId === newLine.variantId)
-  const quantity = existing ? existing.quantity + 1 : 1
+  const step = stepFor(newLine.unit)
+  const quantity = existing ? existing.quantity + step : step
 
   const error = stockError(existing ?? newLine, quantity, allowNegativeStock)
   if (error) return fail(cart, error)
-  if (quantity > MAX_QUANTITY) return fail(cart, 'Quantity is too large')
+  if (quantity > maxFor(newLine.unit))
+    return fail(cart, 'Quantity is too large')
 
   if (existing) return ok(updateLine(cart, newLine.variantId, { quantity }))
-  return ok({ ...cart, lines: [...cart.lines, { ...newLine, quantity: 1 }] })
+  return ok({ ...cart, lines: [...cart.lines, { ...newLine, quantity: step }] })
 }
 
 export function removeItem(cart, variantId) {
@@ -83,7 +92,7 @@ export function setQuantity(
     return fail(cart, 'Quantity must be a whole number')
   }
   if (quantity === 0) return removeItem(cart, variantId)
-  if (quantity > MAX_QUANTITY) return fail(cart, 'Quantity is too large')
+  if (quantity > maxFor(line.unit)) return fail(cart, 'Quantity is too large')
 
   const error = stockError(line, quantity, allowNegativeStock)
   if (error) return fail(cart, error)
@@ -132,8 +141,7 @@ export function setLineDiscount(cart, variantId, discount) {
     )
   }
   if (checked.discount?.type === 'amount') {
-    const lineTotal = line.unitPricePaise * line.quantity
-    if (checked.discount.value > lineTotal) {
+    if (checked.discount.value > lineGrossPaise(line)) {
       return fail(cart, 'Discount cannot be more than the item total')
     }
   }

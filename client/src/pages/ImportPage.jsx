@@ -10,11 +10,20 @@ import FormField from '../components/FormField'
 import { inputClass, primaryButton, secondaryButton } from '../components/styles'
 import { AppError } from '../lib/errors'
 import { setLabelPreset } from '../lib/labelPreset'
+import { formatMeters } from '../lib/quantity'
 
 const MAX_SHOWN = 100
 const plural = (n, one, many) => (n === 1 ? one : many)
 const dateOnly = (iso) =>
     new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+
+// "22 pieces · 25.50 m of fabric" (meters are kept as centimetres inside the app)
+function stockParts({ pieces = 0, meters = 0 }) {
+    const parts = []
+    if (pieces > 0) parts.push(`${pieces} pieces`)
+    if (meters > 0) parts.push(`${formatMeters(meters)} m of fabric`)
+    return parts
+}
 
 export default function ImportPage({ readTableFn = readTable, saveFile = downloadFile }) {
     const navigate = useNavigate()
@@ -51,7 +60,10 @@ export default function ImportPage({ readTableFn = readTable, saveFile = downloa
         setStage('reading')
         try {
             const rows = await readTableFn(file)
-            const existing = { products: await db.products.toArray() }
+            const existing = {
+                products: await db.products.toArray(),
+                variants: await db.variants.toArray(),
+            }
             const checked = planImport(rows, existing)
             if (checked.fatal) {
                 setError(checked.fatal)
@@ -86,13 +98,18 @@ export default function ImportPage({ readTableFn = readTable, saveFile = downloa
         }
     }
 
+    // One label for each piece; a roll of fabric gets one label.
     function handlePrintLabels() {
-        setLabelPreset(Object.fromEntries(result.entries.map((entry) => [entry.id, entry.stock])))
+        setLabelPreset(
+            Object.fromEntries(result.entries.map((entry) => [entry.id, entry.unit === 'meter' ? 1 : entry.stock])),
+        )
         navigate('/labels')
     }
 
     const summary = plan?.summary
     const blockedByRepeat = Boolean(previous) && !confirmRepeat
+    const planParts = summary ? stockParts(summary) : []
+    const previousParts = previous ? stockParts(previous) : []
 
     return (
         <div className="space-y-4">
@@ -112,8 +129,9 @@ export default function ImportPage({ readTableFn = readTable, saveFile = downloa
                     Download sample file
                 </button>
                 <ul className="list-disc space-y-1 pl-5 text-sm text-slate-600">
-                    <li>The sample has 5 example rows. Delete them before you add your own stock.</li>
-                    <li>Optional columns: Size, Cost, Company, Category, MRP, Tax %, Price Includes Tax, Allow Discount.</li>
+                    <li>The sample has 7 example rows. Delete them before you add your own stock.</li>
+                    <li>Optional columns: Size, Cost, Company, Category, MRP, Tax %, Price Includes Tax, Allow Discount, Unit.</li>
+                    <li>For fabric sold by length, write <strong>Meter</strong> in Unit and give the Quantity in meters (like 25.5), or write <strong>CM</strong> and give it in centimetres (like 2550). Prices are always <strong>per meter</strong>. A Quantity like &quot;80 cm&quot; also works.</li>
                     <li>Empty MRP uses the selling price. Empty Tax % uses 5. Write <strong>No</strong> in Allow Discount for items that never get a discount.</li>
                     <li>Barcodes are made automatically. SKU and Barcode columns are not needed and are ignored.</li>
                     <li>Save your file as <strong>.xlsx</strong> (or CSV UTF-8). If Excel changes sizes like 2-3 into dates, format the Size column as Text.</li>
@@ -150,7 +168,9 @@ export default function ImportPage({ readTableFn = readTable, saveFile = downloa
                     </p>
                     {summary.ready > 0 && (
                         <p className="text-sm text-slate-600">
-                            {summary.pieces} pieces · {summary.newProducts} new {plural(summary.newProducts, 'product', 'products')}
+                            {planParts.join(' · ')}
+                            {planParts.length > 0 && ' · '}
+                            {summary.newProducts} new {plural(summary.newProducts, 'product', 'products')}
                             {summary.addedToExisting > 0 &&
                                 `, and new entries for ${summary.addedToExisting} existing ${plural(summary.addedToExisting, 'product', 'products')}`}
                             .
@@ -171,8 +191,9 @@ export default function ImportPage({ readTableFn = readTable, saveFile = downloa
                             <p className="font-semibold">This file was imported before</p>
                             <p>
                                 It has the same content as a file imported on {dateOnly(previous.importedAt)} (
-                                {previous.entries} {plural(previous.entries, 'entry', 'entries')}, {previous.pieces}{' '}
-                                pieces). Importing it again adds all that stock a second time.
+                                {previous.entries} {plural(previous.entries, 'entry', 'entries')}
+                                {previousParts.length > 0 && `, ${previousParts.join(' · ')}`}). Importing it again
+                                adds all that stock a second time.
                             </p>
                             <label className="flex items-center gap-2">
                                 <input

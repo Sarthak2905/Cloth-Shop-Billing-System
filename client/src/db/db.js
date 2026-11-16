@@ -25,3 +25,9 @@ db.version(2).stores({
 db.version(3).stores({
   variants: 'id, productId, &barcode, sku, [productId+size], status, createdAt',
 })
+
+// Version 4: bills can be saved before they are paid, so the payment status is indexed
+// ('pending' = waiting for payment). Older bills simply have no payment status.
+db.version(4).stores({
+  sales: 'id, &invoiceNumber, createdAt, status, syncStatus, paymentStatus',
+})

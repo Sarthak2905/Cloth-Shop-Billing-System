@@ -69,7 +69,6 @@ test('the document lists the shop, invoice, items, totals, payment and GST', () 
     '-84.90',
     '-0.10',
     '764.00',
-    'Cash',
     'GST 5% 36.34',
   ]) {
     expect(text).toContain(expected)

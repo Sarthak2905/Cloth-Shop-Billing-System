@@ -1,6 +1,8 @@
 import { formatDateTime } from '../lib/format.js'
 import { paiseToRupees } from '../lib/money.js'
+import { formatQuantity } from '../lib/quantity.js'
 import { LABELS, buildReceipt } from './receiptBuilder.js'
+import { groupReceiptItems, sizeText } from './receiptItems.js'
 
 const money = (paise) => paiseToRupees(paise)
 const signed = (paise) => `${paise < 0 ? '-' : '+'}${money(Math.abs(paise))}`
@@ -20,13 +22,6 @@ const EXTRA = {
   },
 }
 
-// A size of "-" (or empty) means "no size", so it is not printed.
-const NO_SIZE = new Set(['', '-', '--', 'na', 'n/a'])
-function sizeText(size) {
-  const value = String(size ?? '').trim()
-  return NO_SIZE.has(value.toLowerCase()) ? '' : ` (${value})`
-}
-
 // The tax in the bill, one entry per tax rate: [[5, 6133], [12, 2000]] (rate, paise).
 function gstByRate(items) {
   const totals = new Map()
@@ -38,7 +33,9 @@ function gstByRate(items) {
   return [...totals.entries()].sort((a, b) => a[0] - b[0])
 }
 
-// The receipt as a list of blocks (a centred line, a row with a left and a right
+// The customer's bill. It has NO payment lines (no Payment, Received or Change): the
+// payment is the shop's own record, so the bill is the same before and after it is known.
+// The receipt is a list of blocks (a centred line, a row with a left and a right
 // part, a divider...). A block has no idea how many characters fit on a line: the
 // printer layout decides that, so any language wraps and aligns properly.
 export function buildReceiptDocument(
@@ -83,40 +80,55 @@ export function buildReceiptDocument(
 
   // Items
   row(t.item, t.amount, { bold: true })
-  for (const item of items) {
-    blocks.push({
-      kind: 'text',
-      text: `${item.productName}${sizeText(item.size)}`,
-    })
-    row(
-      `${item.quantity} x ${money(item.unitPricePaise)}`,
-      money(item.grossPaise),
-      { indent: true },
-    )
-    if (item.lineDiscountPaise > 0) {
-      row(t.itemDiscount, `-${money(item.lineDiscountPaise)}`, { indent: true })
+  const itemRows = (list) => {
+    for (const item of list) {
+      blocks.push({
+        kind: 'text',
+        text: `${item.productName}${sizeText(item.size)}`,
+      })
+      row(
+        `${formatQuantity(item.quantity, item.unit)} x ${money(item.unitPricePaise)}`,
+        money(item.grossPaise),
+        { indent: true },
+      )
+      if (item.lineDiscountPaise > 0) {
+        row(t.itemDiscount, `-${money(item.lineDiscountPaise)}`, {
+          indent: true,
+        })
+      }
     }
   }
-  divider()
+
+  const groups = groupReceiptItems(sale, items)
+  if (groups.grouped) {
+    // The items that took the discount, with their subtotal, the discount and what is left...
+    itemRows(groups.withDiscount)
+    divider()
+    row(
+      `${t.subtotal} (${groups.withDiscountCount})`,
+      money(groups.subtotalPaise),
+    )
+    row(t.discount, `-${money(groups.billDiscountPaise)}`)
+    row(t.afterDiscount, money(groups.afterDiscountPaise), { bold: true })
+    // ...then the items without a discount.
+    if (groups.withoutDiscount.length > 0) {
+      divider()
+      itemRows(groups.withoutDiscount)
+    }
+    if (sale.taxAddedPaise > 0 || sale.roundOffPaise !== 0) divider()
+  } else {
+    itemRows(items)
+    divider()
+    row(`${t.subtotal} (${sale.itemCount})`, money(sale.subtotalPaise))
+    if (sale.discountPaise > 0) row(t.discount, `-${money(sale.discountPaise)}`)
+  }
 
   // Totals
-  row(`${t.subtotal} (${sale.itemCount})`, money(sale.subtotalPaise))
-  if (sale.discountPaise > 0) row(t.discount, `-${money(sale.discountPaise)}`)
   if (sale.taxAddedPaise > 0) row(t.taxAdded, money(sale.taxAddedPaise))
   if (sale.roundOffPaise !== 0) row(t.roundOff, signed(sale.roundOffPaise))
   divider('double')
   row(t.total, money(sale.totalPaise), { bold: true, big: true })
   divider('double')
-
-  // Payment
-  const payment = sale.payment
-  row(`${t.payment}:`, t.methods[payment.method] ?? payment.method)
-  if (payment.method === 'cash') {
-    row(t.received, money(payment.amountTenderedPaise))
-    if (payment.changePaise > 0) row(t.change, money(payment.changePaise))
-  }
-  if (payment.reference)
-    blocks.push({ kind: 'text', text: `${t.reference}: ${payment.reference}` })
 
   // GST in the bill: one row per tax rate, for example "GST 5%  61.33".
   const gst = gstByRate(items)

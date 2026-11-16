@@ -18,6 +18,7 @@ const ALIASES = {
     'inclusiveoftax',
   ],
   allowDiscount: ['allowdiscount', 'discountallowed', 'discount'],
+  unit: ['unit', 'soldby', 'unitofmeasure', 'uom'],
 }
 
 export const REQUIRED = [

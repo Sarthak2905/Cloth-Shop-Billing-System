@@ -4,6 +4,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { searchProducts } from '../db/catalogRepo'
 import { seedSampleData } from '../db/sampleData'
 import { inputClass, primaryButton, secondaryButton } from '../components/styles'
+import { formatQuantity } from '../lib/quantity'
 
 export default function ProductsPage() {
     const [query, setQuery] = useState('')
@@ -54,7 +55,7 @@ export default function ProductsPage() {
             )}
 
             <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                {rows?.map(({ product, variants, totalStock, lowStock }) => (
+                {rows?.map(({ product, variants, unit, totalStock, lowStock }) => (
                     <li key={product.id}>
                         <Link
                             to={`/products/${product.id}`}
@@ -74,7 +75,8 @@ export default function ProductsPage() {
                                 )}
                             </div>
                             <p className="mt-2 text-sm text-slate-600">
-                                {variants.length} {variants.length === 1 ? 'variant' : 'variants'} · {totalStock} in stock
+                                {variants.length} {variants.length === 1 ? 'variant' : 'variants'} ·{' '}
+                                {formatQuantity(totalStock, unit)} in stock
                             </p>
                         </Link>
                     </li>

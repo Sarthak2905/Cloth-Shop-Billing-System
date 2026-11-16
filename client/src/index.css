@@ -1,1 +1,73 @@
 @import "tailwindcss";
+
+/* `dark:` classes work when the page has the "dark" class. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+  The accent colour. The app's classes still say "blue" (bg-blue-600 ...), this block
+  decides the real colour: green. To change the accent for the whole app, change these
+  ten values.
+*/
+@theme {
+  --color-blue-50: #ecfdf5;
+  --color-blue-100: #d1fae5;
+  --color-blue-200: #a7f3d0;
+  --color-blue-300: #6ee7b7;
+  --color-blue-400: #34d399;
+  --color-blue-500: #10b981;
+  --color-blue-600: #047857;
+  --color-blue-700: #065f46;
+  --color-blue-800: #064e3b;
+  --color-blue-900: #022c22;
+}
+
+html {
+  color-scheme: light;
+}
+body {
+  color: var(--color-slate-900);
+}
+
+/* Dark mode: the grey scale and the notice colours are swapped, so every page changes. */
+html.dark {
+  color-scheme: dark;
+
+  --color-slate-50: #1e2a3d;
+  --color-slate-100: #0b1220;
+  --color-slate-200: #263449;
+  --color-slate-300: #3a4a63;
+  --color-slate-400: #8b9ab0;
+  --color-slate-500: #a3b1c6;
+  --color-slate-600: #c2cddd;
+  --color-slate-700: #dbe4f0;
+  --color-slate-800: #eef2f8;
+  --color-slate-900: #f8fafc;
+
+  --color-red-50: #3b1219;
+  --color-red-100: #4a1a22;
+  --color-red-300: #7f2d38;
+  --color-red-600: #f87171;
+  --color-red-700: #fca5a5;
+  --color-red-800: #fecaca;
+
+  --color-green-50: #0f2f22;
+  --color-green-100: #123a29;
+  --color-green-700: #86efac;
+  --color-green-800: #bbf7d0;
+  --color-green-900: #dcfce7;
+
+  --color-amber-50: #33270b;
+  --color-amber-100: #3d2e0c;
+  --color-amber-300: #7c5a12;
+  --color-amber-700: #fcd34d;
+  --color-amber-800: #fde68a;
+  --color-amber-900: #fef3c7;
+
+  --color-blue-50: #0f2f24;
+  --color-blue-100: #12382b;
+  --color-blue-800: #a7f3d0;
+  --color-blue-900: #d1fae5;
+}
+html.dark .bg-white {
+  background-color: #162033;
+}

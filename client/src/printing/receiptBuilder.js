@@ -1,11 +1,13 @@
 import { formatDateTime } from '../lib/format.js'
 import { paiseToRupees } from '../lib/money.js'
+import { formatQuantity } from '../lib/quantity.js'
+import { groupReceiptItems, sizeText } from './receiptItems.js'
 import { centerText, divider, twoColumns, wrapText } from './textLayout.js'
 
 // Characters per line for each paper width (typical Font A on thermal printers).
 // '80-42' is 80 mm paper with 42 characters per line, which is what the Epson TM-T88III/IV
 // prints in its normal font. '80' (48 characters) suits newer printers such as the TM-T88V.
-export const PAPER_COLUMNS = { '58': 32, '80': 48, '80-42': 42 }
+export const PAPER_COLUMNS = { 58: 32, 80: 48, '80-42': 42 }
 
 // The Marathi wording is a first draft. Please have it checked by someone fluent.
 export const LABELS = {
@@ -16,6 +18,7 @@ export const LABELS = {
     amount: 'Amount (Rs)',
     subtotal: 'Subtotal',
     discount: 'Discount',
+    afterDiscount: 'After discount',
     itemDiscount: 'Item discount',
     taxAdded: 'Tax added',
     roundOff: 'Round off',
@@ -39,6 +42,7 @@ export const LABELS = {
     amount: 'रक्कम (रु)',
     subtotal: 'उप-एकूण',
     discount: 'सूट',
+    afterDiscount: 'सूटनंतर',
     itemDiscount: 'वस्तू सूट',
     taxAdded: 'कर (अधिक)',
     roundOff: 'पूर्णांक',
@@ -62,6 +66,7 @@ const signed = (paise) => `${paise < 0 ? '-' : '+'}${money(Math.abs(paise))}`
 
 // Builds the exact lines a receipt printer should print.
 // paperWidth: '58' | '80'. language: 'en' | 'mr'.
+// The customer's bill has NO payment lines: the payment is the shop's own record.
 export function buildReceipt(
   sale,
   items,
@@ -93,42 +98,73 @@ export function buildReceipt(
 
   // Items
   lines.push(...twoColumns(t.item, t.amount, width))
-  for (const item of items) {
-    lines.push(...wrapText(`${item.productName} (${item.size})`, width))
-    lines.push(
-      ...twoColumns(
-        `${item.quantity} x ${money(item.unitPricePaise)}`,
-        money(item.grossPaise),
-        width,
-        2,
-      ),
-    )
-    if (item.lineDiscountPaise > 0) {
+  const printItems = (list) => {
+    for (const item of list) {
+      lines.push(
+        ...wrapText(`${item.productName}${sizeText(item.size)}`, width),
+      )
       lines.push(
         ...twoColumns(
-          t.itemDiscount,
-          `-${money(item.lineDiscountPaise)}`,
+          `${formatQuantity(item.quantity, item.unit)} x ${money(item.unitPricePaise)}`,
+          money(item.grossPaise),
           width,
           2,
         ),
       )
+      if (item.lineDiscountPaise > 0) {
+        lines.push(
+          ...twoColumns(
+            t.itemDiscount,
+            `-${money(item.lineDiscountPaise)}`,
+            width,
+            2,
+          ),
+        )
+      }
     }
   }
-  lines.push(divider(width))
+
+  const groups = groupReceiptItems(sale, items)
+  if (groups.grouped) {
+    printItems(groups.withDiscount)
+    lines.push(divider(width))
+    lines.push(
+      ...twoColumns(
+        `${t.subtotal} (${groups.withDiscountCount})`,
+        money(groups.subtotalPaise),
+        width,
+      ),
+    )
+    lines.push(
+      ...twoColumns(t.discount, `-${money(groups.billDiscountPaise)}`, width),
+    )
+    lines.push(
+      ...twoColumns(t.afterDiscount, money(groups.afterDiscountPaise), width),
+    )
+    if (groups.withoutDiscount.length > 0) {
+      lines.push(divider(width))
+      printItems(groups.withoutDiscount)
+    }
+    if (sale.taxAddedPaise > 0 || sale.roundOffPaise !== 0)
+      lines.push(divider(width))
+  } else {
+    printItems(items)
+    lines.push(divider(width))
+    lines.push(
+      ...twoColumns(
+        `${t.subtotal} (${sale.itemCount})`,
+        money(sale.subtotalPaise),
+        width,
+      ),
+    )
+    if (sale.discountPaise > 0) {
+      lines.push(
+        ...twoColumns(t.discount, `-${money(sale.discountPaise)}`, width),
+      )
+    }
+  }
 
   // Totals
-  lines.push(
-    ...twoColumns(
-      `${t.subtotal} (${sale.itemCount})`,
-      money(sale.subtotalPaise),
-      width,
-    ),
-  )
-  if (sale.discountPaise > 0) {
-    lines.push(
-      ...twoColumns(t.discount, `-${money(sale.discountPaise)}`, width),
-    )
-  }
   if (sale.taxAddedPaise > 0) {
     lines.push(...twoColumns(t.taxAdded, money(sale.taxAddedPaise), width))
   }
@@ -139,26 +175,6 @@ export function buildReceipt(
   lines.push(...twoColumns(t.total, money(sale.totalPaise), width))
   lines.push(divider(width, '='))
 
-  // Payment
-  const payment = sale.payment
-  lines.push(
-    ...twoColumns(
-      `${t.payment}:`,
-      t.methods[payment.method] ?? payment.method,
-      width,
-    ),
-  )
-  if (payment.method === 'cash') {
-    lines.push(
-      ...twoColumns(t.received, money(payment.amountTenderedPaise), width),
-    )
-    if (payment.changePaise > 0) {
-      lines.push(...twoColumns(t.change, money(payment.changePaise), width))
-    }
-  }
-  if (payment.reference) {
-    lines.push(...wrapText(`${t.reference}: ${payment.reference}`, width))
-  }
   if (sale.taxIncludedPaise > 0) {
     lines.push(
       ...twoColumns(t.includesTax, money(sale.taxIncludedPaise), width),

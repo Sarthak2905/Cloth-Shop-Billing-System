@@ -11,6 +11,8 @@ const RENAME = { costPaise: 'cost', mrpPaise: 'mrp', sellingPricePaise: 'price',
 // Edits one stock entry: size, cost, MRP, selling price and tax. The barcode and the
 // stock quantity are not edited here (stock changes through "Adjust stock").
 export default function EntryEditForm({ entry, onDone }) {
+    const meter = entry.unit === 'meter'
+    const per = meter ? ' per meter' : ''
     const [values, setValues] = useState({
         size: entry.size ?? '',
         cost: entry.costPaise ? paiseToRupees(entry.costPaise) : '',
@@ -75,18 +77,22 @@ export default function EntryEditForm({ entry, onDone }) {
     return (
         <form onSubmit={handleSubmit} className="mt-3 space-y-3 rounded-lg bg-slate-50 p-3" noValidate>
             <div className="grid grid-cols-2 gap-3">
-                <FormField label="Size" htmlFor={`e-size-${entry.id}`} error={errors.size}>
+                <FormField
+                    label={meter ? 'Design / shade' : 'Size'}
+                    htmlFor={`e-size-${entry.id}`}
+                    error={errors.size}
+                >
                     <input id={`e-size-${entry.id}`} className={inputClass} value={values.size} onChange={set('size')} />
                 </FormField>
-                <FormField label="Cost (₹)" htmlFor={`e-cost-${entry.id}`} error={errors.cost}>
+                <FormField label={`Cost (₹${per})`} htmlFor={`e-cost-${entry.id}`} error={errors.cost}>
                     <input id={`e-cost-${entry.id}`} inputMode="decimal" className={inputClass}
                         value={values.cost} onChange={set('cost')} />
                 </FormField>
-                <FormField label="MRP (₹)" htmlFor={`e-mrp-${entry.id}`} error={errors.mrp}>
+                <FormField label={`MRP (₹${per})`} htmlFor={`e-mrp-${entry.id}`} error={errors.mrp}>
                     <input id={`e-mrp-${entry.id}`} inputMode="decimal" className={inputClass}
                         value={values.mrp} onChange={set('mrp')} />
                 </FormField>
-                <FormField label="Selling price (₹)" htmlFor={`e-price-${entry.id}`} error={errors.price}>
+                <FormField label={`Selling price (₹${per})`} htmlFor={`e-price-${entry.id}`} error={errors.price}>
                     <input id={`e-price-${entry.id}`} inputMode="decimal" className={inputClass}
                         value={values.price} onChange={set('price')} />
                 </FormField>

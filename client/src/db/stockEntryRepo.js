@@ -5,11 +5,17 @@ import { createVariant } from './variantRepo.js'
 import { AppError } from '../lib/errors.js'
 import { productKey } from '../lib/productKey.js'
 
+// The low-stock alert starts at 3 pieces, or at 3.00 m (300 cm) for fabric.
+const DEFAULT_LOW_STOCK = { piece: 3, meter: 300 }
+
 // Saves stock entries: one row = one entry with its own barcode, stock, cost and price.
 // - The same product and size can be entered again and again. Nothing is blocked.
-// - Entries of the same name + category + company share one product card.
+// - Entries of the same name + category + company + unit share one product card.
+//   A fabric (meter) and a garment (piece) with the same name are separate products,
+//   so their stock numbers are never mixed.
 // - All rows are saved together, or nothing is saved.
 // rows: [{ size, quantity, costPaise, sellingPricePaise, mrpPaise }]
+// For fabric (unit 'meter'), quantity is in whole CENTIMETRES and prices are per meter.
 export async function addStockEntries({
   name,
   category = '',
@@ -17,8 +23,12 @@ export async function addStockEntries({
   supplier = '',
   taxRatePercent = 5,
   priceIncludesTax = true,
+  unit = 'piece',
   rows,
 }) {
+  if (!['piece', 'meter'].includes(unit)) {
+    throw new AppError('VALIDATION_ERROR', 'Sold by must be Piece or Meter')
+  }
   if (!Array.isArray(rows) || rows.length === 0) {
     throw new AppError(
       'VALIDATION_ERROR',
@@ -48,9 +58,24 @@ export async function addStockEntries({
         .where('status')
         .equals('active')
         .toArray()
-      let product = active.find(
-        (p) => productKey(p.name, p.category, p.brand) === key,
-      )
+
+      let product = null
+      for (const candidate of active) {
+        if (
+          productKey(candidate.name, candidate.category, candidate.brand) !==
+          key
+        )
+          continue
+        const variants = await db.variants
+          .where('productId')
+          .equals(candidate.id)
+          .toArray()
+        const units = new Set(variants.map((v) => v.unit ?? 'piece'))
+        if (units.size === 0 || (units.size === 1 && units.has(unit))) {
+          product = candidate
+          break
+        }
+      }
       if (!product) product = await createProduct(productData)
 
       const entries = []
@@ -65,9 +90,9 @@ export async function addStockEntries({
               sellingPricePaise: row.sellingPricePaise,
               taxRatePercent: row.taxRatePercent ?? taxRatePercent,
               priceIncludesTax,
-              reorderThreshold: row.reorderThreshold ?? 3,
+              reorderThreshold: row.reorderThreshold ?? DEFAULT_LOW_STOCK[unit],
               openingStock: row.quantity,
-              unit: row.unit ?? 'piece',
+              unit,
             },
             { reason: 'Stock entry' },
           ),

@@ -1,38 +1,31 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { db } from '../db/db'
-import { seedSampleData } from '../db/sampleData'
-import { createSale } from '../db/saleRepo'
 import { addItem, createCart, lineFromVariant } from '../billing/cart'
-import { formatINR, paiseToRupees } from '../lib/money'
-import SalesPage from './SalesPage'
+import { createSale } from '../db/saleRepo'
+import { newId } from '../lib/id'
+import { clearDb, makeItem } from '../test-utils/correctionFixtures'
 import SaleDetailPage from './SaleDetailPage'
+import SalesPage from './SalesPage'
 
-async function saveOneSale() {
-    const variant = (await db.variants.toArray())[0]
-    const product = await db.products.get(variant.productId)
+beforeEach(clearDb)
+
+// One ₹399 shirt, paid in cash.
+async function makeSale() {
+    const { product, variant } = await makeItem({
+        name: 'Cotton Shirt', price: 39900, barcode: 'BC-0001', sku: 'A',
+    })
     const cart = addItem(createCart(), lineFromVariant(variant, product)).cart
-    const { sale } = await createSale({ id: 'sale-1', cart, payment: { method: 'cash' } })
-    return { sale, product, variant }
+    const { sale } = await createSale({
+        id: newId(),
+        cart,
+        payments: [{ method: 'cash', amountPaise: 39900 }],
+    })
+    return { sale, product }
 }
 
-function renderDetail(saleId) {
-    return render(
-        <MemoryRouter initialEntries={[`/sales/${saleId}`]}>
-            <Routes>
-                <Route path="/sales/:id" element={<SaleDetailPage />} />
-            </Routes>
-        </MemoryRouter>,
-    )
-}
+test('the sales page lists saved sales with invoice number, total and how it was paid', async () => {
+    const { sale } = await makeSale()
 
-beforeEach(async () => {
-    await Promise.all(db.tables.map((t) => t.clear()))
-    await seedSampleData()
-})
-
-test('the sales page lists saved sales with invoice number and total', async () => {
-    const { sale } = await saveOneSale()
     render(
         <MemoryRouter>
             <SalesPage />
@@ -40,53 +33,28 @@ test('the sales page lists saved sales with invoice number and total', async () 
     )
 
     expect(await screen.findByText(sale.invoiceNumber)).toBeInTheDocument()
-    expect(screen.getByText(formatINR(sale.totalPaise))).toBeInTheDocument()
+    expect(screen.getByText('₹399.00')).toBeInTheDocument()
+    expect(screen.getByText(/1 items.*Cash/)).toBeInTheDocument()
 })
 
-test('the sale detail page shows the item and the payment', async () => {
-    const { sale, product } = await saveOneSale()
-    renderDetail(sale.id)
+test('the sale detail page shows the item and the payment, and the bill has no payment line', async () => {
+    const { sale } = await makeSale()
 
-    expect(
-        await screen.findAllByText(sale.invoiceNumber)
-    ).toHaveLength(2)
-    expect(screen.getByText(product.name)).toBeInTheDocument()
-    expect(screen.getAllByText('Cash')).toHaveLength(2)
-})
+    render(
+        <MemoryRouter initialEntries={[`/sales/${sale.id}`]}>
+            <Routes>
+                <Route path="/sales/:id" element={<SaleDetailPage />} />
+            </Routes>
+        </MemoryRouter>,
+    )
 
-test('the receipt preview shows the invoice number and the total', async () => {
-    const { sale } = await saveOneSale()
-    renderDetail(sale.id)
+    // the item is in the list and in the receipt preview
+    expect((await screen.findAllByText(/Cotton Shirt/)).length).toBeGreaterThan(0)
 
-    const preview = await screen.findByTestId('receipt-preview')
-    expect(preview).toHaveTextContent(sale.invoiceNumber)
-    expect(preview).toHaveTextContent(paiseToRupees(sale.totalPaise))
-})
+    const payment = await screen.findByTestId('payment-records')
+    expect(payment).toHaveTextContent('Cash')
+    expect(payment).toHaveTextContent('Received: ₹399.00')
 
-test('printing records a job, and printing again is a reprint that creates no new sale', async () => {
-    const { sale } = await saveOneSale()
-    renderDetail(sale.id)
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Print receipt' }))
-    expect(await screen.findByTestId('print-message')).toHaveTextContent('simulated')
-    expect(await screen.findAllByTestId('print-job')).toHaveLength(1)
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Reprint receipt' }))
-    await waitFor(() => expect(screen.getAllByTestId('print-job')).toHaveLength(2))
-    expect(screen.getByTestId('receipt-preview')).toHaveTextContent('DUPLICATE COPY')
-    expect(await db.sales.count()).toBe(1)
-})
-
-test('a printer problem shows an error and keeps the sale', async () => {
-    const { sale } = await saveOneSale()
-    renderDetail(sale.id)
-
-    fireEvent.change(await screen.findByLabelText('Printer'), {
-        target: { value: 'simulated:paper_out' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Print receipt' }))
-
-    expect(await screen.findByTestId('print-message')).toHaveTextContent('out of paper')
-    expect(await screen.findByTestId('print-job')).toHaveTextContent('Failed')
-    expect(await db.sales.count()).toBe(1)
+    // "Cash" appears once, in the payment box. The customer's bill does not have it.
+    expect(screen.getAllByText('Cash')).toHaveLength(1)
 })

@@ -60,6 +60,7 @@ test('a row with only the required columns gets sensible defaults', () => {
   })
   expect(plan.ready[0].variant).toEqual({
     size: 'M',
+    unit: 'piece',
     quantity: 10,
     costPaise: 0,
     mrpPaise: 59900,

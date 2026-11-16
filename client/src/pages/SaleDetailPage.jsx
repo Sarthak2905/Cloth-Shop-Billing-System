@@ -9,10 +9,13 @@ import { listPrintJobs, printReceipt } from '../printing/printService'
 import BillTotals from '../components/BillTotals'
 import CorrectBillPanel from '../components/CorrectBillPanel'
 import FormField from '../components/FormField'
+import PaymentRecordPanel from '../components/PaymentRecordPanel'
 import ReceiptPreview from '../components/ReceiptPreview'
 import { inputClass, primaryButton, secondaryButton } from '../components/styles'
-import { PAYMENT_LABEL, formatDateTime } from '../lib/format'
+import { formatDateTime } from '../lib/format'
 import { formatINR } from '../lib/money'
+import { paymentBreakdown, paymentInfo, paymentText } from '../lib/payments'
+import { formatQuantity } from '../lib/quantity'
 
 const CONFIRMATION_TEXT = {
     simulated: 'simulated only, nothing was physically printed',
@@ -43,6 +46,7 @@ export default function SaleDetailPage() {
     const [printing, setPrinting] = useState(false)
     const [message, setMessage] = useState(null)
     const [showCorrect, setShowCorrect] = useState(false)
+    const [showPay, setShowPay] = useState(false)
 
     const paperWidth = widthChoice ?? settings?.receiptPaperWidth ?? '58'
     const language = languagePick ?? settings?.receiptLanguage ?? 'en'
@@ -111,6 +115,9 @@ export default function SaleDetailPage() {
     }
 
     const { sale, items } = data
+    const info = paymentInfo(sale)
+    const lines = paymentBreakdown(sale)
+    const hasCash = lines.some((p) => p.method === 'cash')
 
     return (
         <div className="space-y-4">
@@ -161,7 +168,7 @@ export default function SaleDetailPage() {
                             <div>
                                 <p className="font-semibold">{item.productName}</p>
                                 <p className="text-sm text-slate-500">
-                                    Size {item.size} · {item.quantity} x {formatINR(item.unitPricePaise)}
+                                    Size {item.size} · {formatQuantity(item.quantity, item.unit)} x {formatINR(item.unitPricePaise)}
                                 </p>
                             </div>
                             <p className="font-semibold">
@@ -179,17 +186,43 @@ export default function SaleDetailPage() {
 
             <BillTotals totals={sale} />
 
-            <div className="rounded-xl bg-white p-4 text-sm shadow-sm">
+            <div data-testid="payment-records" className="rounded-xl bg-white p-4 text-sm shadow-sm">
                 <p className="font-semibold">Payment</p>
-                <p>{PAYMENT_LABEL[sale.payment.method]}</p>
-                {sale.payment.method === 'cash' && (
-                    <>
-                        <p>Received: {formatINR(sale.payment.amountTenderedPaise)}</p>
-                        <p>Change: {formatINR(sale.payment.changePaise)}</p>
-                    </>
+                <p className="text-xs text-slate-500">
+                    For your records only. It is never printed on the customer&apos;s bill.
+                </p>
+                {info.status === 'pending' ? (
+                    <p className="mt-1 font-semibold text-amber-700">
+                        Payment pending · {formatINR(sale.totalPaise)} to receive
+                    </p>
+                ) : (
+                    <div className="mt-1 space-y-0.5">
+                        <p>{paymentText(sale)}</p>
+                        {lines.length > 1 &&
+                            lines.map((p) => (
+                                <p key={p.method} className="text-slate-600">
+                                    {p.label}: {formatINR(p.amountPaise)}
+                                    {p.reference && ` (${p.reference})`}
+                                </p>
+                            ))}
+                        <p>Received: {formatINR(info.receivedPaise)}</p>
+                        {hasCash && <p>Change: {formatINR(info.changePaise)}</p>}
+                        {info.shortPaise > 0 && (
+                            <p className="font-semibold text-amber-700">Short: {formatINR(info.shortPaise)} (accepted)</p>
+                        )}
+                        {lines.length === 1 && lines[0].reference && <p>Reference: {lines[0].reference}</p>}
+                    </div>
                 )}
-                {sale.payment.reference && <p>Reference: {sale.payment.reference}</p>}
             </div>
+
+            {sale.status === 'completed' &&
+                (showPay ? (
+                    <PaymentRecordPanel sale={sale} />
+                ) : (
+                    <button type="button" className={secondaryButton} onClick={() => setShowPay(true)}>
+                        {info.status === 'pending' ? 'Record payment' : 'Change payment'}
+                    </button>
+                ))}
 
             {sale.status === 'completed' &&
                 (showCorrect ? (

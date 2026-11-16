@@ -2,6 +2,7 @@ import { db } from './db.js'
 
 // Returns active products with their active variants, filtered by a search text.
 // Matches product name/brand/category, or any variant SKU/barcode.
+// `unit` is 'piece' or 'meter'; totalStock is in that unit (centimetres for meters).
 export async function searchProducts(query = '') {
   const q = query.trim().toLowerCase()
   const products = await db.products.where('status').equals('active').toArray()
@@ -18,6 +19,7 @@ export async function searchProducts(query = '') {
     return {
       product,
       variants: pv,
+      unit: pv[0]?.unit ?? 'piece',
       totalStock: pv.reduce((sum, v) => sum + v.currentStock, 0),
       lowStock: pv.some((v) => v.currentStock <= v.reorderThreshold),
     }
@@ -50,10 +52,15 @@ export async function listSellableVariants() {
 
   return variants
     .filter((v) => productById.has(v.productId))
-    .map((variant) => ({ variant, product: productById.get(variant.productId) }))
+    .map((variant) => ({
+      variant,
+      product: productById.get(variant.productId),
+    }))
     .sort(
       (a, b) =>
         a.product.name.localeCompare(b.product.name) ||
-        a.variant.size.localeCompare(b.variant.size, undefined, { numeric: true }),
+        a.variant.size.localeCompare(b.variant.size, undefined, {
+          numeric: true,
+        }),
     )
 }

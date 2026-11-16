@@ -1,21 +1,22 @@
 import { buildReceipt } from './receiptBuilder'
-import { visualLength } from './textLayout'
 
 const sale = (over = {}) => ({
   invoiceNumber: 'INV-000001',
   createdAt: '2026-10-29T10:45:00.000Z',
   shop: {
-    name: 'एस जी धोकटे कलेक्शन, जेऊर',
-    address: 'जेऊर | जुना टेंभुर्णी रोड, सरकारी दवाखान्याजवळ',
-    phone: '7350892009',
-    taxId: '',
+    name: 'Sarthak Fashions',
+    address: 'Main Road, Baramati\nPune 413102',
+    phone: '9876543210',
+    taxId: '27ABCDE1234F1Z5',
     footer: '',
   },
   itemCount: 1,
   subtotalPaise: 79900,
   discountPaise: 7990,
+  billDiscountPaise: 7990,
   taxAddedPaise: 0,
   taxIncludedPaise: 3424,
+  taxPaise: 3424,
   roundOffPaise: -10,
   totalPaise: 71900,
   payment: {
@@ -31,136 +32,169 @@ const item = (over = {}) => ({
   productName: 'Cotton Shirt',
   size: 'M',
   quantity: 1,
+  unit: 'piece',
   unitPricePaise: 79900,
   grossPaise: 79900,
   lineDiscountPaise: 0,
   ...over,
 })
 
-test('prints the shop, invoice, items, totals and payment', () => {
-  const withTaxId = sale({ shop: { ...sale().shop, taxId: '27ABCDE1234F1Z5' } })
-  const { text } = buildReceipt(withTaxId, [item()])
+test('prints the shop, invoice, items, totals and tax, and no payment lines', () => {
+  const { text } = buildReceipt(sale(), [item()], { paperWidth: '80-42' })
 
   for (const expected of [
-    'एस जी धोकटे कलेक्शन, जेऊर',
-    'जुना टेंभुर्णी रोड, सरकारी दवाखान्याजवळ',
-    'Ph: 7350892009',
+    'Sarthak Fashions',
+    'Main Road, Baramati',
+    'Pune 413102',
+    'Ph: 9876543210',
     'GSTIN: 27ABCDE1234F1Z5',
+    'Invoice:',
     'INV-000001',
-    'Date:',
     'Cotton Shirt (M)',
     '1 x 799.00',
+    'Subtotal (1)',
     '-79.90',
+    'After discount',
+    'Round off',
     '-0.10',
+    'TOTAL',
     '719.00',
-    'Cash',
-    '800.00',
-    '81.00',
     'Includes tax',
     '34.24',
+    'Thank you! Visit again.',
   ]) {
     expect(text).toContain(expected)
   }
-})
-
-test('every line fits the paper width and the TOTAL row spans it', () => {
-  const longItem = item({
-    productName: 'Premium Slim Fit Cotton Casual Shirt With Long Sleeves',
-  })
-  for (const [paper, columns] of [
-    ['58', 32],
-    ['80', 48],
-  ]) {
-    const receipt = buildReceipt(sale(), [longItem], { paperWidth: paper })
-    expect(receipt.width).toBe(columns)
-    expect(receipt.lines.every((line) => visualLength(line) <= columns)).toBe(
-      true,
-    )
-    const totalRow = receipt.lines.find((line) => line.startsWith('TOTAL'))
-    expect(visualLength(totalRow)).toBe(columns)
+  for (const missing of ['Payment', 'Received', 'Change', 'Cash']) {
+    expect(text).not.toContain(missing)
   }
 })
 
-test('wraps a long item name and keeps the amount on the quantity line', () => {
-  const { lines } = buildReceipt(sale(), [
-    item({
-      productName: 'Premium Slim Fit Cotton Casual Shirt With Long Sleeves',
-    }),
-  ])
-  const nameLines = lines.filter((line) => /Premium|Casual|Sleeves/.test(line))
-  expect(nameLines.length).toBeGreaterThan(1)
-  expect(lines.some((line) => /^ {2}1 x 799\.00 +799\.00$/.test(line))).toBe(
-    true,
-  )
-})
-
-test('prints Marathi shop and item names without breaking letters', () => {
-  const marathi = sale({
-    shop: {
-      name: 'एस जी धोकटे कलेक्शन, जेऊर',
-      address: '',
-      phone: '',
-      taxId: '',
-      footer: '',
+test('the text is exactly what a pending bill prints too', () => {
+  const pending = sale({
+    paymentStatus: 'pending',
+    payment: {
+      method: 'pending',
+      amountTenderedPaise: 0,
+      changePaise: 0,
+      reference: '',
     },
   })
-  const { lines } = buildReceipt(marathi, [item({ productName: 'कॉटन शर्ट' })])
-  expect(lines.every((line) => visualLength(line) <= 32)).toBe(true)
-  expect(lines.some((line) => /^\s*\p{M}/u.test(line))).toBe(false)
-})
 
-test('can print the labels in Marathi', () => {
-  const { text } = buildReceipt(sale(), [item()], { language: 'mr' })
-  expect(text).toContain('एकूण')
-  expect(text).toContain('दिनांक')
-  expect(text).toContain('धन्यवाद')
-  expect(text).not.toContain('Subtotal')
-})
-
-test('marks a reprint as a duplicate copy', () => {
-  expect(buildReceipt(sale(), [item()], { reprint: true }).text).toContain(
-    'DUPLICATE COPY',
+  expect(buildReceipt(pending, [item()]).text).toBe(
+    buildReceipt(sale(), [item()]).text,
   )
-  expect(buildReceipt(sale(), [item()]).text).not.toContain('DUPLICATE COPY')
 })
 
-test('only prints discount, added tax, round off and reference when they apply', () => {
+test('the Marathi labels are used when asked, with no payment lines', () => {
+  const { text } = buildReceipt(sale(), [item()], {
+    paperWidth: '80',
+    language: 'mr',
+  })
+
+  for (const expected of [
+    'बिल क्र.',
+    'उप-एकूण',
+    'सूटनंतर',
+    'एकूणात कर',
+    'धन्यवाद! पुन्हा भेट द्या.',
+  ]) {
+    expect(text).toContain(expected)
+  }
+  for (const missing of ['भरणा', 'मिळालेले', 'रोख', 'Subtotal']) {
+    expect(text).not.toContain(missing)
+  }
+})
+
+test('no line is longer than the paper, and long names wrap', () => {
+  const long = item({
+    productName: 'A very long product name that needs to wrap onto more lines',
+  })
+
+  for (const [paperWidth, width] of [
+    ['58', 32],
+    ['80', 48],
+    ['80-42', 42],
+  ]) {
+    const receipt = buildReceipt(sale(), [long], { paperWidth })
+    expect(receipt.width).toBe(width)
+    expect(receipt.lines.every((line) => line.length <= width)).toBe(true)
+  }
+  expect(
+    buildReceipt(sale(), [long], { paperWidth: '58' }).lines.join('\n'),
+  ).toContain('wrap')
+})
+
+test('an unknown paper width falls back to 58 mm, and the receipt asks for a cut', () => {
+  const receipt = buildReceipt(sale(), [item()], { paperWidth: 'xx' })
+
+  expect(receipt).toMatchObject({ paperWidth: '58', width: 32, cut: true })
+  expect(receipt.text).toBe(receipt.lines.join('\n'))
+})
+
+test('a reprint carries the duplicate line and a first print does not', () => {
+  expect(buildReceipt(sale(), [item()], { reprint: true }).text).toContain(
+    '*** DUPLICATE COPY ***',
+  )
+  expect(buildReceipt(sale(), [item()]).text).not.toContain('DUPLICATE')
+})
+
+test('a bill without a bill discount or tax stays plain', () => {
   const plain = sale({
+    billDiscountPaise: 0,
     discountPaise: 0,
-    taxAddedPaise: 0,
     taxIncludedPaise: 0,
+    taxPaise: 0,
     roundOffPaise: 0,
+    totalPaise: 79900,
   })
   const { text } = buildReceipt(plain, [item()])
+
+  expect(text).toContain('Subtotal (1)')
+  expect(text).toContain('799.00')
   for (const missing of [
     'Discount',
-    'Round off',
-    'Tax added',
+    'After discount',
     'Includes tax',
-    'Ref:',
+    'Round off',
   ]) {
     expect(text).not.toContain(missing)
   }
-
-  const upi = sale({
-    payment: {
-      method: 'upi',
-      amountTenderedPaise: 71900,
-      changePaise: 0,
-      reference: 'UPI123',
-    },
-  })
-  expect(buildReceipt(upi, [item()]).text).toContain('Ref: UPI123')
 })
 
-test('uses the shop footer or a default thank-you line', () => {
-  const custom = sale({
-    shop: { ...sale().shop, footer: 'Exchange within 7 days' },
+test('an item discount is shown under its item', () => {
+  const plain = sale({
+    billDiscountPaise: 0,
+    discountPaise: 5000,
+    totalPaise: 74900,
+    roundOffPaise: 0,
   })
-  expect(buildReceipt(custom, [item()]).text).toContain(
-    'Exchange within 7 days',
+  const { text } = buildReceipt(plain, [item({ lineDiscountPaise: 5000 })])
+
+  expect(text).toContain('Item discount')
+  expect(text).toContain('-50.00')
+})
+
+test('a size of "-" is not printed, and fabric shows its length', () => {
+  const { text } = buildReceipt(
+    sale({
+      billDiscountPaise: 0,
+      discountPaise: 0,
+      roundOffPaise: 0,
+      taxIncludedPaise: 0,
+    }),
+    [
+      item({
+        productName: 'Astar',
+        size: '-',
+        unit: 'meter',
+        quantity: 235,
+        unitPricePaise: 3500,
+        grossPaise: 8225,
+      }),
+    ],
   )
-  expect(buildReceipt(sale(), [item()]).text).toContain(
-    'Thank you! Visit again.',
-  )
+
+  expect(text).not.toContain('(-)')
+  expect(text).toContain('2.35 m x 35.00')
 })

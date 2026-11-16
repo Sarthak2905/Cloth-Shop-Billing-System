@@ -1,8 +1,10 @@
+import { parseLength } from '../lib/quantity.js'
 import { productKey } from '../lib/productKey.js'
 import { mapHeaders } from './columns.js'
 
 const MAX_PAISE = 100_000_000 // 10 lakh rupees
 const MAX_ROWS = 5000
+const MAX_METER_CM = 10_000_000 // 100,000 m
 const DEFAULT_TAX_PERCENT = 5
 
 const isBlank = (value) =>
@@ -42,10 +44,63 @@ function parseMoney(value, label, errors) {
   return paise
 }
 
-function parseQuantity(value, errors) {
+const PIECE_WORDS = ['piece', 'pieces', 'pc', 'pcs', 'nos', 'no']
+const METER_WORDS = ['meter', 'meters', 'metre', 'metres', 'm', 'mtr', 'mtrs']
+const CM_WORDS = [
+  'cm',
+  'cms',
+  'centimeter',
+  'centimeters',
+  'centimetre',
+  'centimetres',
+]
+
+// Returns { unit, quantityIn }.
+//   Piece -> pieces.
+//   Meter -> fabric, Quantity written in meters (25.5).
+//   CM    -> fabric, Quantity written in centimetres (2550).
+// For fabric the PRICES are always per meter.
+function parseUnit(value, errors) {
+  if (isBlank(value)) return { unit: 'piece', quantityIn: 'm' }
+  const word = String(value).trim().toLowerCase().replace(/\.$/, '')
+  if (PIECE_WORDS.includes(word)) return { unit: 'piece', quantityIn: 'm' }
+  if (METER_WORDS.includes(word)) return { unit: 'meter', quantityIn: 'm' }
+  if (CM_WORDS.includes(word)) return { unit: 'meter', quantityIn: 'cm' }
+  errors.push('Unit must be Piece, Meter or CM')
+  return { unit: 'piece', quantityIn: 'm' }
+}
+
+// Pieces: a whole number. Fabric: a length, returned as whole centimetres. The cell may
+// also carry its own unit ("80 cm", "2.5 m").
+function parseQuantity(value, unit, quantityIn, errors) {
   if (isBlank(value)) {
     errors.push('Quantity is empty')
     return 0
+  }
+  if (unit === 'meter') {
+    let cm = null
+    if (typeof value === 'number') {
+      if (quantityIn === 'cm') {
+        cm = Number.isInteger(value) ? value : null
+      } else {
+        const rounded = Math.round(value * 100)
+        cm =
+          Number.isFinite(value) && Math.abs(value * 100 - rounded) < 1e-6
+            ? rounded
+            : null
+      }
+    } else {
+      cm = parseLength(String(value), quantityIn)
+    }
+    if (cm === null || cm < 1 || cm > MAX_METER_CM) {
+      errors.push(
+        quantityIn === 'cm'
+          ? 'Quantity must be whole centimetres like 80'
+          : 'Quantity must be meters like 25 or 25.5',
+      )
+      return 0
+    }
+    return cm
   }
   const n = typeof value === 'number' ? value : Number(String(value).trim())
   if (!Number.isInteger(n) || n < 1 || n > 1_000_000) {
@@ -97,6 +152,7 @@ function emptyPlan(fatal, ignoredColumns = []) {
       rowsRead: 0,
       ready: 0,
       pieces: 0,
+      meters: 0,
       newProducts: 0,
       addedToExisting: 0,
       problems: 0,
@@ -105,10 +161,11 @@ function emptyPlan(fatal, ignoredColumns = []) {
 }
 
 // Checks every row of the file BEFORE anything is saved. Nothing here touches the
-// database: `existing` is a snapshot ({ products }) passed in.
+// database: `existing` is a snapshot ({ products, variants }) passed in.
 // Every row is its own stock entry. The same product and size may appear any number
 // of times: nothing is skipped or refused for being a repeat.
-export function planImport(rows, existing = { products: [] }) {
+// A fabric (Meter or CM) and a garment (Piece) with the same name are separate products.
+export function planImport(rows, existing = { products: [], variants: [] }) {
   const headerIndex = rows.findIndex((r) => r.some((cell) => !isBlank(cell)))
   if (headerIndex === -1) return emptyPlan('The file is empty.')
 
@@ -126,12 +183,16 @@ export function planImport(rows, existing = { products: [] }) {
     )
   }
 
-  // Same rule as the Add stock screen: an active product with the same name, company
-  // and category is reused; otherwise a new product is made.
+  // An existing product is reused when name, company, category AND unit all match.
+  const unitByProduct = new Map()
+  for (const v of existing.variants ?? []) {
+    if (!unitByProduct.has(v.productId))
+      unitByProduct.set(v.productId, v.unit ?? 'piece')
+  }
   const productByKey = new Map()
   for (const p of existing.products) {
     if (p.status === 'archived') continue
-    const key = productKey(p.name, p.category, p.brand)
+    const key = `${productKey(p.name, p.category, p.brand)}|${unitByProduct.get(p.id) ?? 'piece'}`
     if (!productByKey.has(key)) productByKey.set(key, p)
   }
 
@@ -167,7 +228,8 @@ export function planImport(rows, existing = { products: [] }) {
     const size = str('size', 'Size', 50, false)
     const brand = str('brand', 'Company', 60, false)
     const category = str('category', 'Category', 60, false)
-    const quantity = parseQuantity(get('quantity'), errors)
+    const { unit, quantityIn } = parseUnit(get('unit'), errors)
+    const quantity = parseQuantity(get('quantity'), unit, quantityIn, errors)
 
     const selling = parseMoney(get('sellingPrice'), 'Selling Price', errors)
     if (selling === null) errors.push('Selling Price is empty')
@@ -198,7 +260,7 @@ export function planImport(rows, existing = { products: [] }) {
       continue
     }
 
-    const key = productKey(name, category, brand)
+    const key = `${productKey(name, category, brand)}|${unit}`
     const existingProduct = productByKey.get(key) ?? null
 
     ready.push({
@@ -209,6 +271,7 @@ export function planImport(rows, existing = { products: [] }) {
       product: { name, category, brand },
       variant: {
         size,
+        unit,
         quantity,
         costPaise: cost ?? 0,
         mrpPaise: mrp,
@@ -225,6 +288,10 @@ export function planImport(rows, existing = { products: [] }) {
   const existingIds = new Set(
     ready.filter((r) => r.existingProductId).map((r) => r.existingProductId),
   )
+  const total = (unit) =>
+    ready
+      .filter((r) => r.variant.unit === unit)
+      .reduce((sum, r) => sum + r.variant.quantity, 0)
 
   return {
     fatal: null,
@@ -234,7 +301,8 @@ export function planImport(rows, existing = { products: [] }) {
     summary: {
       rowsRead,
       ready: ready.length,
-      pieces: ready.reduce((total, r) => total + r.variant.quantity, 0),
+      pieces: total('piece'),
+      meters: total('meter'), // in centimetres
       newProducts: newKeys.size,
       addedToExisting: existingIds.size,
       problems: problems.length,

@@ -1,8 +1,10 @@
-import { NavLink, Outlet } from 'react-router-dom'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import SyncProvider from '../sync/SyncProvider'
 import BackupReminder from './BackupReminder'
+import OnlinePill from './OnlinePill'
 import StatusBar from './StatusBar'
 import SyncBadge from './SyncBadge'
+import ThemeToggle from './ThemeToggle'
 
 const linkClass = ({ isActive }) =>
     `shrink-0 whitespace-nowrap rounded-lg px-3 py-1.5 text-sm font-medium ${isActive ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-slate-200'
@@ -21,27 +23,42 @@ const LINKS = [
 ]
 
 function LayoutBody() {
+    const { pathname } = useLocation()
+    // The billing screen uses the whole window and never scrolls the page on a laptop.
+    const wide = pathname.startsWith('/billing')
+
     return (
-        <div className="min-h-screen bg-slate-100 print:bg-white">
-            <header className="bg-white shadow-sm print:hidden">
-                <div className="mx-auto max-w-3xl px-4 py-3">
-                    <h1 className="text-lg font-bold">Clothing POS</h1>
-                    <nav className="-mx-1 mt-2 flex gap-1 overflow-x-auto px-1 pb-1">
+        <div className="flex h-dvh flex-col bg-slate-100 print:block print:h-auto print:bg-white">
+            <header className="shrink-0 border-b border-slate-200 bg-white print:hidden">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
+                    <h1 className="shrink-0 text-base font-bold">Clothing POS</h1>
+                    <nav className="order-last flex w-full gap-1 overflow-x-auto md:order-none md:w-auto md:min-w-0 md:flex-1">
                         {LINKS.map(([to, label]) => (
                             <NavLink key={to} to={to} className={linkClass}>
                                 {label}
                             </NavLink>
                         ))}
                     </nav>
+                    <div className="ml-auto flex shrink-0 items-center gap-2 md:ml-0">
+                        <OnlinePill />
+                        <SyncBadge />
+                        <ThemeToggle />
+                    </div>
                 </div>
             </header>
-            <StatusBar />
+            <StatusBar showPill={false} />
             <BackupReminder />
-            <div className="mx-auto max-w-3xl px-4 pt-2 print:hidden">
-                <SyncBadge />
-            </div>
-            <main className="mx-auto max-w-3xl p-4 print:max-w-none print:p-0">
-                <Outlet />
+            <main
+                className={`min-h-0 flex-1 print:overflow-visible print:p-0 ${wide ? 'overflow-y-auto p-2 lg:overflow-hidden lg:p-3' : 'overflow-y-auto'
+                    }`}
+            >
+                {wide ? (
+                    <Outlet />
+                ) : (
+                    <div className="mx-auto max-w-5xl p-4 print:max-w-none print:p-0">
+                        <Outlet />
+                    </div>
+                )}
             </main>
         </div>
     )

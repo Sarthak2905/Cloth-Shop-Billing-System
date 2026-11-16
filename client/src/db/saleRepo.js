@@ -6,7 +6,9 @@ import { validate } from './schemas.js'
 import { calculateTotals } from '../billing/calc.js'
 import { AppError } from '../lib/errors.js'
 import { newId } from '../lib/id.js'
+import { summarizePayments } from '../lib/payments.js'
 
+// The older way of paying: one method for the whole bill.
 const paymentSchema = z.object({
   method: z.enum(['cash', 'upi', 'card']),
   amountTenderedPaise: z.number().int().nonnegative().optional(),
@@ -15,11 +17,20 @@ const paymentSchema = z.object({
 
 // Saves a completed bill. `id` is the idempotency key: saving the same id again
 // returns the existing sale and changes nothing.
-export async function createSale({ id, cart, payment }) {
+// Payment:
+//   payments: [{ method, amountPaise, reference }]  cash + UPI + card, any short or
+//             extra amount is allowed (a short bill is a bargain, extra cash is change)
+//   payment:  { method, amountTenderedPaise }       one method for the whole bill; cash
+//             must cover the total
+//   neither:  the bill is saved as "payment pending" and paid later
+export async function createSale({ id, cart, payment, payments }) {
   if (typeof id !== 'string' || !id) {
     throw new AppError('VALIDATION_ERROR', 'A sale id is required')
   }
-  const pay = validate(paymentSchema, payment ?? {})
+  const legacy =
+    payments === undefined && payment !== undefined && payment !== null
+      ? validate(paymentSchema, payment)
+      : null
 
   if (!cart?.lines?.length)
     throw new AppError('EMPTY_BILL', 'The bill is empty')
@@ -67,30 +78,48 @@ export async function createSale({ id, cart, payment }) {
         roundToRupee: settings.roundToRupee,
       })
 
-      let amountTenderedPaise = totals.totalPaise
-      if (pay.method === 'cash' && pay.amountTenderedPaise !== undefined) {
-        amountTenderedPaise = pay.amountTenderedPaise
+      let paid
+      if (Array.isArray(payments)) {
+        paid = summarizePayments(totals.totalPaise, payments)
+      } else if (legacy) {
+        let tendered = totals.totalPaise
+        if (
+          legacy.method === 'cash' &&
+          legacy.amountTenderedPaise !== undefined
+        ) {
+          tendered = legacy.amountTenderedPaise
+        }
+        if (tendered < totals.totalPaise) {
+          throw new AppError(
+            'INSUFFICIENT_PAYMENT',
+            'Cash received is less than the total',
+          )
+        }
+        paid = summarizePayments(totals.totalPaise, [
+          {
+            method: legacy.method,
+            amountPaise: tendered,
+            reference: legacy.reference,
+          },
+        ])
+      } else {
+        paid = summarizePayments(totals.totalPaise, [])
       }
-      if (amountTenderedPaise < totals.totalPaise) {
-        throw new AppError(
-          'INSUFFICIENT_PAYMENT',
-          'Cash received is less than the total',
-        )
-      }
-      const changePaise = amountTenderedPaise - totals.totalPaise
+      if (paid.error) throw new AppError('INVALID_PAYMENT', paid.error)
 
       const counterRow = await db.settings.get('invoiceCounter')
       const sequence = (counterRow?.value ?? 0) + 1
       await db.settings.put({ key: 'invoiceCounter', value: sequence })
       const invoiceNumber = `${settings.invoicePrefix}-${String(sequence).padStart(6, '0')}`
 
+      const createdAt = new Date().toISOString()
       const sale = {
         id,
         invoiceNumber,
         invoiceSequence: sequence,
         status: 'completed',
         syncStatus: 'pending',
-        createdAt: new Date().toISOString(),
+        createdAt,
         shop: {
           name: settings.shopName,
           address: settings.address,
@@ -111,12 +140,12 @@ export async function createSale({ id, cart, payment }) {
         exactTotalPaise: totals.exactTotalPaise,
         roundOffPaise: totals.roundOffPaise,
         totalPaise: totals.totalPaise,
-        payment: {
-          method: pay.method,
-          amountTenderedPaise,
-          changePaise,
-          reference: pay.reference ?? '',
-        },
+        payment: paid.summary,
+        payments: paid.payments,
+        paymentStatus: paid.status,
+        receivedPaise: paid.receivedPaise,
+        shortPaise: paid.shortPaise,
+        paymentRecordedAt: paid.status === 'paid' ? createdAt : null,
       }
       await db.sales.add(sale)
 
@@ -133,6 +162,7 @@ export async function createSale({ id, cart, payment }) {
           barcode: line.barcode,
           size: line.size,
           quantity: line.quantity,
+          unit: line.unit ?? 'piece',
           unitPricePaise: line.unitPricePaise,
           mrpPaise: line.mrpPaise,
           taxRatePercent: line.taxRatePercent,

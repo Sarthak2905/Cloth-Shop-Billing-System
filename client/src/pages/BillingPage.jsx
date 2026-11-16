@@ -1,4 +1,3 @@
-import ReceiptPrintButton from '../components/ReceiptPrintButton'
 import { isStorageFull } from '../lib/storageErrors'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
@@ -7,6 +6,7 @@ import { listSellableVariants } from '../db/catalogRepo'
 import { getSettings } from '../db/settingsRepo'
 import { createSale } from '../db/saleRepo'
 import { buildCorrectionCart, correctSale } from '../db/correctionRepo'
+import { countPendingPayments } from '../db/paymentRepo'
 import { lookupBarcode } from '../scanner/scanService'
 import { useBarcodeScanner } from '../scanner/useBarcodeScanner'
 import { simulateKeyboardScan } from '../scanner/simulateScan'
@@ -17,24 +17,92 @@ import {
     removeItem,
     setBillDiscount,
     setLineDiscount,
+    setLineDiscountExcluded,
     setQuantity,
 } from '../billing/cart'
 import { calculateTotals } from '../billing/calc'
+import { createPrinter } from '../printing/printerFactory'
+import { printReceipt } from '../printing/printService'
+import BillLine from '../components/BillLine'
 import CameraScanner from '../components/CameraScanner'
 import CartLine from '../components/CartLine'
-import BillTotals from '../components/BillTotals'
 import CorrectionPayment from '../components/CorrectionPayment'
 import DiscountEditor from '../components/DiscountEditor'
-import FormField from '../components/FormField'
-import PaymentPanel from '../components/PaymentPanel'
+import PayBox from '../components/PayBox'
+import PaymentRecordPanel from '../components/PaymentRecordPanel'
 import { inputClass, primaryButton, secondaryButton } from '../components/styles'
 import { AppError } from '../lib/errors'
-import { PAYMENT_LABEL } from '../lib/format'
 import { newId } from '../lib/id'
 import { formatINR } from '../lib/money'
+import { EMPTY_PAYMENT_FORM, paymentsFromForm } from '../lib/paymentForm'
+import { paymentInfo, summarizePayments } from '../lib/payments'
+import { formatQuantity } from '../lib/quantity'
 
-const QUICK_PERCENT = 10
+const QUICK_PERCENTS = [10, 20]
 const CORRECTION_WINDOW_MS = 15 * 60 * 1000 // the owner PIN approval is valid for 15 minutes
+
+const PRINT_DONE = {
+    simulated: 'Simulated print only: nothing came out of a printer. Choose "Windows printer" in Settings.',
+    handed_off: 'Sent to the printer.',
+    device_confirmed: 'Printed.',
+}
+
+function TotalsCard({ totals }) {
+    const discountable = totals.eligibleBasePaise
+    const partial =
+        totals.billDiscountPaise > 0 &&
+        discountable !== undefined &&
+        discountable < totals.subtotalPaise - totals.itemDiscountPaise
+
+    return (
+        <div className="rounded-xl bg-white p-3 shadow-sm">
+            <dl className="space-y-0.5 text-sm text-slate-700">
+                <div className="flex justify-between">
+                    <dt>Subtotal ({totals.itemCount} items)</dt>
+                    <dd>{formatINR(totals.subtotalPaise)}</dd>
+                </div>
+                {totals.discountPaise > 0 && (
+                    <div className="flex justify-between">
+                        <dt>Discount</dt>
+                        <dd>-{formatINR(totals.discountPaise)}</dd>
+                    </div>
+                )}
+                {totals.taxAddedPaise > 0 && (
+                    <div className="flex justify-between">
+                        <dt>GST added</dt>
+                        <dd>{formatINR(totals.taxAddedPaise)}</dd>
+                    </div>
+                )}
+                {totals.taxIncludedPaise > 0 && (
+                    <div className="flex justify-between text-slate-500">
+                        <dt>GST included</dt>
+                        <dd>{formatINR(totals.taxIncludedPaise)}</dd>
+                    </div>
+                )}
+                {totals.roundOffPaise !== 0 && (
+                    <div className="flex justify-between">
+                        <dt>Round off</dt>
+                        <dd>
+                            {totals.roundOffPaise < 0 ? '-' : '+'}
+                            {formatINR(Math.abs(totals.roundOffPaise))}
+                        </dd>
+                    </div>
+                )}
+            </dl>
+            <div className="mt-2 flex items-baseline justify-between border-t border-slate-200 pt-2">
+                <span className="text-base font-bold">Total</span>
+                <span data-testid="bill-total" className="text-3xl font-bold">
+                    {formatINR(totals.totalPaise)}
+                </span>
+            </div>
+            {partial && (
+                <p className="mt-1 text-xs text-slate-500">
+                    The bill discount applies to {formatINR(discountable)} of items that allow discounts.
+                </p>
+            )}
+        </div>
+    )
+}
 
 export default function BillingPage() {
     const location = useLocation()
@@ -48,14 +116,24 @@ export default function BillingPage() {
     const saleIdRef = useRef(null) // idempotency key for the sale being saved
     const [notice, setNotice] = useState(null)
     const [completed, setCompleted] = useState(null)
+    const [printMsg, setPrintMsg] = useState(null)
+    const [showRecord, setShowRecord] = useState(false)
     const [correction, setCorrection] = useState(null) // { sale, reason } while correcting a bill
+    const [focusRequest, setFocusRequest] = useState(null) // jumps to a fabric's length box
+    const [flashId, setFlashId] = useState(null) // the item that was just added
     const [code, setCode] = useState('')
     const [search, setSearch] = useState('')
     const [cameraOn, setCameraOn] = useState(false)
+    const [payForm, setPayForm] = useState(EMPTY_PAYMENT_FORM)
+    const [payError, setPayError] = useState('')
+    const [saving, setSaving] = useState(false)
     const inputRef = useRef(null)
+    const listRef = useRef(null)
+    const saveRef = useRef(null)
 
     const settings = useLiveQuery(() => getSettings(), [])
     const items = useLiveQuery(() => listSellableVariants(), [])
+    const pendingCount = useLiveQuery(() => countPendingPayments(), []) ?? 0
     const allowNegativeStock = settings?.allowNegativeStock ?? false
     // While correcting, the old quantities are put back when saving, so the screen does
     // not block here. The real stock check happens when the corrected bill is saved.
@@ -67,6 +145,8 @@ export default function BillingPage() {
         [cart, roundToRupee],
     )
     const totalsByVariant = new Map(totals.lines.map((l) => [l.variantId, l]))
+    // The newest item is shown first.
+    const ordered = [...cart.lines].reverse()
 
     // Opens the old bill for correction when the owner PIN was accepted on the sale page.
     useEffect(() => {
@@ -102,6 +182,22 @@ export default function BillingPage() {
         }
     }, [authSaleId, authAt, authReason])
 
+    // F2 = the barcode box, F9 = save & print.
+    useEffect(() => {
+        function onKey(e) {
+            if (e.key === 'F2') {
+                e.preventDefault()
+                inputRef.current?.focus({ preventScroll: true })
+                inputRef.current?.select()
+            } else if (e.key === 'F9') {
+                e.preventDefault()
+                saveRef.current?.(true)
+            }
+        }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+    }, [])
+
     // Runs a cart change. Returns the error message, or null when it worked.
     function applyChange(change, successText) {
         const { cart: next, error } = change(cartRef.current)
@@ -118,10 +214,18 @@ export default function BillingPage() {
     }
 
     function addToBill(variant, product) {
-        applyChange(
+        const meter = variant.unit === 'meter'
+        const error = applyChange(
             (c) => addItem(c, lineFromVariant(variant, product), { allowNegativeStock: stockRule }),
-            `Added ${product.name} (size ${variant.size})`,
+            meter
+                ? `Added ${product.name} (${variant.size}), 1.00 m. Type the length or tap a quick length.`
+                : `Added ${product.name} (size ${variant.size})`,
         )
+        if (error) return
+        setFlashId(variant.id)
+        if (listRef.current) listRef.current.scrollTop = 0
+        // Fabric: the cursor jumps into its length box.
+        if (meter) setFocusRequest({ variantId: variant.id, n: Date.now() })
     }
 
     async function handleCode(raw) {
@@ -137,7 +241,7 @@ export default function BillingPage() {
         e.preventDefault()
         handleCode(code)
         setCode('')
-        inputRef.current?.focus()
+        inputRef.current?.focus({ preventScroll: true })
     }
 
     function handleSimulate() {
@@ -151,6 +255,7 @@ export default function BillingPage() {
         cartRef.current = createCart()
         saleIdRef.current = null
         setCart(cartRef.current)
+        setFlashId(null)
         setNotice(null)
     }
 
@@ -173,25 +278,68 @@ export default function BillingPage() {
         return null
     }
 
-    // Saves the sale. Returns an error message, or null when it worked.
-    async function completeSale(payment) {
+    // Prints the customer's bill on the printer chosen in Settings. The sale is already
+    // saved, so a printing problem never loses it.
+    async function printSale(saleId) {
+        try {
+            const current = await getSettings()
+            const job = await printReceipt({ saleId, printer: createPrinter(current.receiptPrinter) })
+            setPrintMsg(
+                job.status === 'completed'
+                    ? { type: 'ok', text: PRINT_DONE[job.confirmation] ?? 'Done.' }
+                    : { type: 'error', text: job.error },
+            )
+        } catch (err) {
+            setPrintMsg({ type: 'error', text: err.message })
+        }
+    }
+
+    function afterSave(sale) {
+        saleIdRef.current = null
+        cartRef.current = createCart()
+        setCart(cartRef.current)
+        setCompleted(sale)
+        setFlashId(null)
+        setNotice(null)
+        setPrintMsg(null)
+        setShowRecord(false)
+        setPayForm(EMPTY_PAYMENT_FORM)
+        inputRef.current?.focus({ preventScroll: true })
+    }
+
+    // Saves the bill with whatever payment was typed (nothing typed = payment pending),
+    // then prints it.
+    async function handleSave(print = true) {
+        if (saving || cartRef.current.lines.length === 0) return
+        const { payments, error } = paymentsFromForm(payForm)
+        if (error) {
+            setPayError(error)
+            return
+        }
+        const summary = summarizePayments(totals.totalPaise, payments)
+        if (summary.error) {
+            setPayError(summary.error)
+            return
+        }
+
+        setPayError('')
+        setSaving(true)
         saleIdRef.current ??= newId()
         try {
             const { sale } = await createSale({
                 id: saleIdRef.current,
                 cart: cartRef.current,
-                payment,
+                payments,
             })
-            saleIdRef.current = null
-            cartRef.current = createCart()
-            setCart(cartRef.current)
-            setCompleted(sale)
-            setNotice(null)
-            return null
+            afterSave(sale)
+            if (print) await printSale(sale.id)
         } catch (err) {
-            return errorText(err) ?? 'Could not save the sale. Nothing was charged. Please try again.'
+            setPayError(errorText(err) ?? 'Could not save the sale. Nothing was charged. Please try again.')
+        } finally {
+            setSaving(false)
         }
     }
+    saveRef.current = correction ? null : handleSave
 
     // Saves the corrected bill: cancels the old one and makes a new invoice.
     async function completeCorrection(payment) {
@@ -205,13 +353,10 @@ export default function BillingPage() {
                 cart: cartRef.current,
                 payment,
             })
-            saleIdRef.current = null
-            cartRef.current = createCart()
-            setCart(cartRef.current)
-            setCompleted(sale)
+            afterSave(sale)
             setCorrection(null)
-            setNotice(null)
             navigate('/billing', { replace: true, state: null })
+            await printSale(sale.id)
             return null
         } catch (err) {
             return (
@@ -230,210 +375,284 @@ export default function BillingPage() {
                     variant.sku.toLowerCase().includes(query) ||
                     variant.barcode.toLowerCase().includes(query),
             )
-            .slice(0, 8)
+            .slice(0, 6)
         : []
 
-    const quickOn =
-        cart.billDiscount?.type === 'percent' && cart.billDiscount.value === QUICK_PERCENT
+    const quickOn = (percent) =>
+        cart.billDiscount?.type === 'percent' && cart.billDiscount.value === percent
+    const info = completed ? paymentInfo(completed) : null
 
     return (
-        <div className="space-y-4">
-            <h2 className="text-xl font-bold">{correction ? 'Correct bill' : 'Billing'}</h2>
+        <div className="flex flex-col gap-3 lg:h-full lg:min-h-0 lg:flex-row">
+            {/* Left: scanning and the items */}
+            <section className="flex min-h-0 flex-col gap-3 lg:flex-1">
+                {correction && (
+                    <div
+                        role="status"
+                        data-testid="correction-banner"
+                        className="shrink-0 space-y-2 rounded-xl border-l-4 border-amber-500 bg-amber-50 p-3"
+                    >
+                        <p className="font-semibold text-amber-900">Correcting {correction.sale.invoiceNumber}</p>
+                        <p className="text-sm text-amber-900">
+                            Reason: {correction.reason}. Original total {formatINR(correction.sale.totalPaise)}.
+                            Saving cancels the old bill and makes a new invoice.
+                        </p>
+                        <button type="button" className={secondaryButton} onClick={handleCancelCorrection}>
+                            Cancel correction
+                        </button>
+                    </div>
+                )}
 
-            {correction && (
-                <div
-                    role="status"
-                    data-testid="correction-banner"
-                    className="space-y-2 rounded-xl border-l-4 border-amber-500 bg-amber-50 p-4"
-                >
-                    <p className="font-semibold text-amber-900">Correcting {correction.sale.invoiceNumber}</p>
-                    <p className="text-sm text-amber-900">
-                        Reason: {correction.reason}. Original total {formatINR(correction.sale.totalPaise)}.
-                        Saving cancels the old bill and makes a new invoice.
-                    </p>
-                    <button type="button" className={secondaryButton} onClick={handleCancelCorrection}>
-                        Cancel correction
-                    </button>
-                </div>
-            )}
-
-            <div className="space-y-3 rounded-xl bg-white p-4 shadow-sm">
-                <form onSubmit={handleSubmit} className="space-y-3">
-                    <FormField label="Barcode" htmlFor="bill-barcode">
-                        <input
-                            id="bill-barcode"
-                            ref={inputRef}
-                            autoFocus
-                            autoComplete="off"
-                            className={inputClass}
-                            value={code}
-                            onChange={(e) => setCode(e.target.value)}
-                            placeholder="Scan or type a barcode, then press Enter"
-                        />
-                    </FormField>
-                    <div className="flex flex-wrap gap-2">
+                <div className="shrink-0 space-y-2 rounded-xl bg-white p-3 shadow-sm">
+                    <form onSubmit={handleSubmit} className="flex flex-wrap items-end gap-2">
+                        <div className="min-w-48 flex-1">
+                            <label htmlFor="bill-barcode" className="text-sm font-medium text-slate-700">
+                                Barcode
+                            </label>
+                            <input
+                                id="bill-barcode"
+                                ref={inputRef}
+                                autoFocus
+                                autoComplete="off"
+                                className={`${inputClass} mt-1`}
+                                value={code}
+                                onChange={(e) => setCode(e.target.value)}
+                                placeholder="Scan or type a barcode, then press Enter"
+                            />
+                        </div>
                         <button type="submit" className={primaryButton}>
                             Add to bill
                         </button>
-                        <button
-                            type="button"
-                            className={secondaryButton}
-                            onClick={() => setCameraOn((on) => !on)}
-                        >
-                            {cameraOn ? 'Stop camera' : 'Start camera'}
+                        <button type="button" className={secondaryButton} onClick={() => setCameraOn((on) => !on)}>
+                            {cameraOn ? 'Stop camera' : 'Camera'}
                         </button>
                         <button type="button" className={secondaryButton} onClick={handleSimulate}>
                             Simulate scan
                         </button>
+                    </form>
+                    <CameraScanner active={cameraOn} onScan={handleCode} />
+
+                    <div>
+                        <label htmlFor="bill-search" className="sr-only">
+                            Search items
+                        </label>
+                        <input
+                            id="bill-search"
+                            className={inputClass}
+                            value={search}
+                            onChange={(e) => setSearch(e.target.value)}
+                            placeholder="Search items by name, SKU or barcode"
+                        />
                     </div>
-                </form>
-                <CameraScanner active={cameraOn} onScan={handleCode} />
-            </div>
-
-            <div className="space-y-3 rounded-xl bg-white p-4 shadow-sm">
-                <FormField label="Search items" htmlFor="bill-search">
-                    <input
-                        id="bill-search"
-                        className={inputClass}
-                        value={search}
-                        onChange={(e) => setSearch(e.target.value)}
-                        placeholder="Name, SKU or barcode"
-                    />
-                </FormField>
-                {query && results.length === 0 && (
-                    <p className="text-sm text-slate-500">No matching items.</p>
-                )}
-                <ul className="space-y-2">
-                    {results.map(({ variant, product }) => (
-                        <li key={variant.id}>
-                            <button
-                                type="button"
-                                aria-label={`Add ${product.name} size ${variant.size}`}
-                                className="flex w-full justify-between rounded-lg border border-slate-200 p-3 text-left hover:bg-slate-50"
-                                onClick={() => addToBill(variant, product)}
-                            >
-                                <span>
-                                    <span className="font-medium">{product.name}</span>
-                                    <span className="block text-sm text-slate-500">
-                                        Size {variant.size} · Stock {variant.currentStock}
-                                    </span>
-                                </span>
-                                <span className="font-medium">{formatINR(variant.sellingPricePaise)}</span>
-                            </button>
-                        </li>
-                    ))}
-                </ul>
-            </div>
-
-            {notice && (
-                <p
-                    role={notice.type === 'error' ? 'alert' : 'status'}
-                    className={`rounded-lg p-3 text-sm ${notice.type === 'error' ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'
-                        }`}
-                >
-                    {notice.text}
-                </p>
-            )}
-
-            {completed && (
-                <div
-                    data-testid="sale-complete"
-                    role="status"
-                    className="space-y-2 rounded-xl border-l-4 border-green-500 bg-white p-4 shadow-sm"
-                >
-                    <p className="font-semibold text-green-700">
-                        {completed.replacesInvoice ? 'Corrected bill saved' : 'Sale saved'}
-                    </p>
-                    <p className="text-lg font-bold">Invoice {completed.invoiceNumber}</p>
-                    {completed.replacesInvoice && (
-                        <p className="text-sm text-slate-600">
-                            Replaces {completed.replacesInvoice} (now cancelled)
-                        </p>
+                    {query && results.length === 0 && <p className="text-sm text-slate-500">No matching items.</p>}
+                    {results.length > 0 && (
+                        <ul className="max-h-40 space-y-1 overflow-y-auto">
+                            {results.map(({ variant, product }) => (
+                                <li key={variant.id}>
+                                    <button
+                                        type="button"
+                                        aria-label={`Add ${product.name} size ${variant.size}`}
+                                        className="flex w-full justify-between rounded-lg border border-slate-200 px-3 py-2 text-left hover:bg-slate-50"
+                                        onClick={() => {
+                                            addToBill(variant, product)
+                                            setSearch('')
+                                        }}
+                                    >
+                                        <span>
+                                            <span className="font-medium">{product.name}</span>
+                                            <span className="block text-xs text-slate-500">
+                                                Size {variant.size} · Stock {formatQuantity(variant.currentStock, variant.unit)}
+                                            </span>
+                                        </span>
+                                        <span className="font-medium">
+                                            {formatINR(variant.sellingPricePaise)}
+                                            {variant.unit === 'meter' ? ' / m' : ''}
+                                        </span>
+                                    </button>
+                                </li>
+                            ))}
+                        </ul>
                     )}
-                    <p className="text-sm text-slate-600">
-                        Total {formatINR(completed.totalPaise)} · {PAYMENT_LABEL[completed.payment.method]}
-                    </p>
-                    {completed.payment.method === 'cash' && completed.payment.changePaise > 0 && (
-                        <p className="text-lg font-semibold">
-                            Change due: {formatINR(completed.payment.changePaise)}
-                        </p>
-                    )}
-                    <ReceiptPrintButton saleId={completed.id} />
-                    <div className="flex gap-2">
-                        <Link to={`/sales/${completed.id}`} className={secondaryButton}>
-                            View sale
-                        </Link>
-                        <button type="button" className={primaryButton} onClick={() => setCompleted(null)}>
-                            New bill
-                        </button>
-                    </div>
                 </div>
-            )}
 
-            {cart.lines.length === 0 ? (
-                <p className="rounded-xl bg-white p-6 text-center text-slate-500 shadow-sm">
-                    The bill is empty. Scan a barcode or search for an item.
-                </p>
-            ) : (
-                <>
-                    <ul className="space-y-2">
-                        {cart.lines.map((line) => (
-                            <CartLine
-                                key={line.variantId}
-                                line={line}
-                                totals={totalsByVariant.get(line.variantId)}
-                                onQuantity={(q) =>
+                {notice && (
+                    <p
+                        role={notice.type === 'error' ? 'alert' : 'status'}
+                        className={`shrink-0 rounded-lg p-2 text-sm ${notice.type === 'error' ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'
+                            }`}
+                    >
+                        {notice.text}
+                    </p>
+                )}
+
+                {completed && (
+                    <div
+                        data-testid="sale-complete"
+                        role="status"
+                        className="shrink-0 space-y-2 rounded-xl border-l-4 border-green-500 bg-white p-3 shadow-sm"
+                    >
+                        <p className="font-semibold text-green-700">
+                            {completed.replacesInvoice ? 'Corrected bill saved' : 'Bill saved'}
+                        </p>
+                        <p className="text-lg font-bold">Invoice {completed.invoiceNumber}</p>
+                        {completed.replacesInvoice && (
+                            <p className="text-sm text-slate-600">Replaces {completed.replacesInvoice} (now cancelled)</p>
+                        )}
+                        <p className="text-sm text-slate-600">
+                            Total {formatINR(completed.totalPaise)} ·{' '}
+                            {info.status === 'pending' ? (
+                                <span className="font-semibold text-amber-700">Payment pending</span>
+                            ) : (
+                                <>
+                                    Received {formatINR(info.receivedPaise)}
+                                    {info.changePaise > 0 && ` · Change ${formatINR(info.changePaise)}`}
+                                    {info.shortPaise > 0 && (
+                                        <span className="font-semibold text-amber-700"> · Short {formatINR(info.shortPaise)}</span>
+                                    )}
+                                </>
+                            )}
+                        </p>
+                        {printMsg && (
+                            <p
+                                data-testid="print-message"
+                                role={printMsg.type === 'error' ? 'alert' : 'status'}
+                                className={`rounded-lg p-2 text-sm ${printMsg.type === 'error' ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'
+                                    }`}
+                            >
+                                {printMsg.text}
+                            </p>
+                        )}
+                        <div className="flex flex-wrap gap-2">
+                            <button type="button" className={primaryButton} onClick={() => printSale(completed.id)}>
+                                Reprint
+                            </button>
+                            {!completed.replacesInvoice && (
+                                <button type="button" className={secondaryButton} onClick={() => setShowRecord((s) => !s)}>
+                                    {info.status === 'pending' ? 'Record payment' : 'Change payment'}
+                                </button>
+                            )}
+                            <Link to={`/sales/${completed.id}`} className={secondaryButton}>
+                                View sale
+                            </Link>
+                            <button type="button" className={secondaryButton} onClick={() => setCompleted(null)}>
+                                New bill
+                            </button>
+                        </div>
+                        {showRecord && <PaymentRecordPanel sale={completed} onSaved={(updated) => setCompleted(updated)} />}
+                    </div>
+                )}
+
+                {cart.lines.length === 0 ? (
+                    <p className="rounded-xl bg-white p-6 text-center text-slate-500 shadow-sm">
+                        The bill is empty. Scan a barcode or search for an item.
+                    </p>
+                ) : (
+                    <ul ref={listRef} className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+                        {ordered.map((line) =>
+                            line.unit === 'meter' ? (
+                                <CartLine
+                                    key={line.variantId}
+                                    line={line}
+                                    totals={totalsByVariant.get(line.variantId)}
+                                    focusRequest={focusRequest}
+                                    onDone={() => inputRef.current?.focus({ preventScroll: true })}
+                                    onQuantity={(q) =>
+                                        applyChange((c) => setQuantity(c, line.variantId, q, { allowNegativeStock: stockRule }))
+                                    }
+                                    onRemove={() => applyChange((c) => removeItem(c, line.variantId))}
+                                    onDiscount={(d) => applyChange((c) => setLineDiscount(c, line.variantId, d))}
+                                />
+                            ) : (
+                                <BillLine
+                                    key={line.variantId}
+                                    line={line}
+                                    totals={totalsByVariant.get(line.variantId)}
+                                    highlight={line.variantId === flashId}
+                                    onQuantity={(q) =>
+                                        applyChange((c) => setQuantity(c, line.variantId, q, { allowNegativeStock: stockRule }))
+                                    }
+                                    onRemove={() => applyChange((c) => removeItem(c, line.variantId))}
+                                    onDiscount={(d) => applyChange((c) => setLineDiscount(c, line.variantId, d))}
+                                    onToggleExcluded={(excluded) =>
+                                        applyChange((c) => setLineDiscountExcluded(c, line.variantId, excluded))
+                                    }
+                                />
+                            ),
+                        )}
+                    </ul>
+                )}
+            </section>
+
+            {/* Right: total, discount and payment, always visible */}
+            <aside className="flex shrink-0 flex-col gap-3 lg:min-h-0 lg:w-96 lg:overflow-y-auto">
+                {pendingCount > 0 && !correction && (
+                    <Link
+                        to="/sales?filter=pending"
+                        className="rounded-lg bg-amber-100 px-3 py-2 text-sm font-medium text-amber-900"
+                    >
+                        {pendingCount} {pendingCount === 1 ? 'bill' : 'bills'} waiting for payment →
+                    </Link>
+                )}
+
+                <TotalsCard totals={totals} />
+
+                <div className="space-y-2 rounded-xl bg-white p-3 shadow-sm">
+                    <p className="font-semibold">Bill discount</p>
+                    <div className="flex flex-wrap gap-2">
+                        {QUICK_PERCENTS.map((percent) => (
+                            <button
+                                key={percent}
+                                type="button"
+                                aria-pressed={quickOn(percent)}
+                                className={quickOn(percent) ? primaryButton : secondaryButton}
+                                onClick={() =>
                                     applyChange((c) =>
-                                        setQuantity(c, line.variantId, q, { allowNegativeStock: stockRule }),
+                                        setBillDiscount(c, quickOn(percent) ? null : { type: 'percent', value: percent }),
                                     )
                                 }
-                                onRemove={() => applyChange((c) => removeItem(c, line.variantId))}
-                                onDiscount={(d) => applyChange((c) => setLineDiscount(c, line.variantId, d))}
-                            />
+                            >
+                                {percent}% off
+                            </button>
                         ))}
-                    </ul>
-
-                    <div className="space-y-3 rounded-xl bg-white p-4 shadow-sm">
-                        <p className="font-semibold">Bill discount</p>
-                        <button
-                            type="button"
-                            aria-pressed={quickOn}
-                            className={quickOn ? primaryButton : secondaryButton}
-                            onClick={() =>
-                                applyChange((c) =>
-                                    setBillDiscount(c, quickOn ? null : { type: 'percent', value: QUICK_PERCENT }),
-                                )
-                            }
-                        >
-                            {QUICK_PERCENT}% off
-                        </button>
+                    </div>
+                    <details>
+                        <summary className="cursor-pointer text-sm text-slate-600">Other discount (percent or ₹)</summary>
                         <DiscountEditor
                             key={JSON.stringify(cart.billDiscount)}
                             label="Bill discount"
                             discount={cart.billDiscount}
                             onApply={(d) => applyChange((c) => setBillDiscount(c, d))}
                         />
-                    </div>
+                    </details>
+                </div>
 
-                    <BillTotals totals={totals} />
+                {correction ? (
+                    <CorrectionPayment
+                        totalPaise={totals.totalPaise}
+                        oldTotalPaise={correction.sale.totalPaise}
+                        onComplete={completeCorrection}
+                    />
+                ) : (
+                    <PayBox
+                        form={payForm}
+                        onForm={(next) => {
+                            setPayForm(next)
+                            setPayError('')
+                        }}
+                        totalPaise={totals.totalPaise}
+                        saving={saving}
+                        error={payError}
+                        disabled={cart.lines.length === 0}
+                        onSave={handleSave}
+                    />
+                )}
 
-                    {correction ? (
-                        <CorrectionPayment
-                            totalPaise={totals.totalPaise}
-                            oldTotalPaise={correction.sale.totalPaise}
-                            onComplete={completeCorrection}
-                        />
-                    ) : (
-                        <PaymentPanel totalPaise={totals.totalPaise} onComplete={completeSale} />
-                    )}
-
-                    {!correction && (
-                        <button type="button" className={secondaryButton} onClick={handleClearBill}>
-                            Clear bill
-                        </button>
-                    )}
-                </>
-            )}
+                {!correction && cart.lines.length > 0 && (
+                    <button type="button" className={secondaryButton} onClick={handleClearBill}>
+                        Clear bill
+                    </button>
+                )}
+            </aside>
         </div>
     )
 }

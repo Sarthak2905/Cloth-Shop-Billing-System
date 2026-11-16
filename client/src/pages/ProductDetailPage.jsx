@@ -21,7 +21,7 @@ function groupBySize(variants) {
     for (const v of variants) {
         const key = String(v.size ?? '').trim().toLowerCase()
         if (!map.has(key)) {
-            map.set(key, { key, label: String(v.size ?? '').trim() || 'No size', unit: v.unit, entries: [], total: 0 })
+            map.set(key, { key, label: String(v.size ?? '').trim() || 'No size', unit: v.unit ?? 'piece', entries: [], total: 0 })
         }
         const group = map.get(key)
         group.entries.push(v)
@@ -63,6 +63,7 @@ export default function ProductDetailPage() {
 
     const { product, variants } = data
     const groups = groupBySize(variants)
+    const unitOfProduct = groups[0]?.unit ?? 'piece'
     const archivedProduct = product.status === 'archived'
 
     async function handleArchiveProduct() {
@@ -89,6 +90,9 @@ export default function ProductDetailPage() {
                     <p className="text-sm text-slate-500">
                         {[product.brand, product.category].filter(Boolean).join(' · ') || 'No company or category'}
                     </p>
+                    {unitOfProduct === 'meter' && (
+                        <p className="text-xs text-slate-500">Sold by the meter</p>
+                    )}
                     {product.discountAllowed === false && (
                         <p className="text-xs text-amber-700">This product never takes a discount.</p>
                     )}
@@ -109,7 +113,14 @@ export default function ProductDetailPage() {
                         {!archivedProduct && (
                             <Link
                                 to="/stock/new"
-                                state={{ product: { name: product.name, category: product.category, brand: product.brand } }}
+                                state={{
+                                    product: {
+                                        name: product.name,
+                                        category: product.category,
+                                        brand: product.brand,
+                                        unit: unitOfProduct,
+                                    },
+                                }}
                                 className={primaryButton}
                             >
                                 Add stock
@@ -153,6 +164,7 @@ export default function ProductDetailPage() {
                         {group.entries.map((entry) => {
                             const archived = entry.status !== 'active'
                             const low = !archived && entry.currentStock <= entry.reorderThreshold
+                            const per = entry.unit === 'meter' ? ' / m' : ''
                             return (
                                 <li
                                     key={entry.id}
@@ -166,8 +178,8 @@ export default function ProductDetailPage() {
                                                 Added {dateOnly(entry.createdAt)} · {quantityText(entry.unit, entry.currentStock)} left
                                             </p>
                                             <p className="text-sm">
-                                                Cost {formatINR(entry.costPaise)} · Selling {formatINR(entry.sellingPricePaise)}
-                                                {entry.mrpPaise !== entry.sellingPricePaise && ` · MRP ${formatINR(entry.mrpPaise)}`}
+                                                Cost {formatINR(entry.costPaise)}{per} · Selling {formatINR(entry.sellingPricePaise)}{per}
+                                                {entry.mrpPaise !== entry.sellingPricePaise && ` · MRP ${formatINR(entry.mrpPaise)}${per}`}
                                             </p>
                                             <p className="font-mono text-xs">{entry.barcode}</p>
                                         </div>
