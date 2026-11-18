@@ -23,18 +23,34 @@ export function validateLabelSize(widthMm, heightMm) {
   return null
 }
 
-// priceMode: 'mrp' | 'selling' | 'none'
+// A size of "-" (or empty) means "no size", so nothing is printed for it.
+const NO_SIZE = new Set(['', '-', '--', 'na', 'n/a'])
+
+// The line under the item name: "Size M" for a garment, the design or shade for fabric
+// sold by the meter, and nothing at all when there is no size.
+export function labelDetail(variant) {
+  const size = String(variant.size ?? '').trim()
+  if (NO_SIZE.has(size.toLowerCase())) return ''
+  return variant.unit === 'meter' ? size : `Size ${size}`
+}
+
+// priceMode: 'mrp' | 'selling' | 'none'. Fabric prices are per meter, so they say "/ m".
 export function buildLabel(variant, product, { priceMode = 'mrp' } = {}) {
   const { symbology, warning } = chooseSymbology(variant.barcode)
+  const per = variant.unit === 'meter' ? ' / m' : ''
 
   let priceText = null
-  if (priceMode === 'mrp') priceText = `MRP ${formatINR(variant.mrpPaise)}`
-  if (priceMode === 'selling') priceText = formatINR(variant.sellingPricePaise)
+  if (priceMode === 'mrp')
+    priceText = `MRP ${formatINR(variant.mrpPaise)}${per}`
+  if (priceMode === 'selling')
+    priceText = `${formatINR(variant.sellingPricePaise)}${per}`
 
   return {
     variantId: variant.id,
     title: product.name,
     size: variant.size,
+    detail: labelDetail(variant),
+    unit: variant.unit ?? 'piece',
     sku: variant.sku,
     barcode: variant.barcode,
     symbology,

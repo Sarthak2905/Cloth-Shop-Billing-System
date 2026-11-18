@@ -1,8 +1,13 @@
 import { useEffect, useState } from 'react'
 import { generateBarcodeSvg } from '../labels/barcodeSvg'
 
+const PADDING_MM = 1.5
+
 export default function LabelPreview({ label, widthMm, heightMm }) {
-    const barcodeHeightMm = Math.max(6, Math.round(heightMm * 0.32))
+    // A label with no size line has room for a taller barcode.
+    const barcodeHeightMm = Math.max(6, Math.round(heightMm * (label.detail ? 0.36 : 0.44)))
+    // The width the barcode may use, so its bars can be a whole number of printer dots wide.
+    const availableMm = widthMm - 2 * PADDING_MM
     const [svg, setSvg] = useState('')
     const [error, setError] = useState('')
 
@@ -12,6 +17,7 @@ export default function LabelPreview({ label, widthMm, heightMm }) {
             value: label.barcode,
             symbology: label.symbology,
             heightMm: barcodeHeightMm,
+            availableMm,
         })
             .then((result) => {
                 if (!cancelled) {
@@ -25,7 +31,7 @@ export default function LabelPreview({ label, widthMm, heightMm }) {
         return () => {
             cancelled = true
         }
-    }, [label.barcode, label.symbology, barcodeHeightMm])
+    }, [label.barcode, label.symbology, barcodeHeightMm, availableMm])
 
     return (
         <div
@@ -34,18 +40,25 @@ export default function LabelPreview({ label, widthMm, heightMm }) {
             style={{
                 width: `${widthMm}mm`,
                 height: `${heightMm}mm`,
-                padding: '1.5mm',
+                padding: `${PADDING_MM}mm`,
                 breakInside: 'avoid',
             }}
         >
             <p className="truncate font-semibold leading-tight" style={{ fontSize: '2.8mm' }}>
                 {label.title}
             </p>
-            <p className="truncate leading-tight" style={{ fontSize: '2.4mm' }}>
-                Size {label.size} · {label.sku}
-            </p>
+            {label.detail && (
+                <p data-testid="label-detail" className="truncate leading-tight" style={{ fontSize: '2.4mm' }}>
+                    {label.detail}
+                </p>
+            )}
 
-            <div style={{ height: `${barcodeHeightMm}mm`, margin: '0.8mm 2mm' }}>
+            {/* hard bar edges, and the barcode centred in the space it has */}
+            <div
+                data-testid="label-barcode"
+                className="[shape-rendering:crispEdges] [&_svg]:[shape-rendering:crispEdges]"
+                style={{ height: `${barcodeHeightMm}mm`, margin: '0.8mm 0' }}
+            >
                 {error ? (
                     <p className="text-red-600" style={{ fontSize: '2.2mm' }}>
                         {error}
