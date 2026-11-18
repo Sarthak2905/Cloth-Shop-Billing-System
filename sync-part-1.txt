@@ -1,0 +1,876 @@
+﻿=== client\src\sync\apiClient.js ===
+export class NetworkError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'NetworkError'
+  }
+}
+
+export class AuthError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'AuthError'
+  }
+}
+
+export class ApiError extends Error {
+  constructor(status, code, message, details) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+    this.details = details
+  }
+}
+
+export const DEFAULT_API_URL =
+  import.meta.env.VITE_API_URL ?? 'http://localhost:5000/api'
+
+// A small wrapper around fetch. It turns every failure into one of three kinds:
+//   NetworkError  the server could not be reached (or did not answer in time)
+//   AuthError     the login is missing, wrong or expired (HTTP 401)
+//   ApiError      the server answered with another error
+export function createApiClient({
+  baseUrl = DEFAULT_API_URL,
+  getToken = () => null,
+  fetchImpl = (...args) => fetch(...args),
+  timeoutMs = 20000,
+} = {}) {
+  async function request(method, path, body) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    const timedOut = () => new NetworkError('The server did not answer in time')
+
+    try {
+      const token = getToken()
+      let response
+      try {
+        response = await fetchImpl(`${baseUrl}${path}`, {
+          method,
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: controller.signal,
+        })
+      } catch (err) {
+        throw err?.name === 'AbortError'
+          ? timedOut()
+          : new NetworkError('Could not reach the server')
+      }
+
+      let data = null
+      try {
+        data = await response.json()
+      } catch {
+        data = null
+      }
+      if (controller.signal.aborted) throw timedOut()
+
+      if (response.ok) return data
+      if (response.status === 401) {
+        throw new AuthError(data?.error?.message ?? 'Please sign in again')
+      }
+      throw new ApiError(
+        response.status,
+        data?.error?.code ?? 'HTTP_ERROR',
+        data?.error?.message ??
+          `The server returned an error (${response.status})`,
+        data?.error?.details,
+      )
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  return {
+    baseUrl,
+    login: (username, password) =>
+      request('POST', '/auth/login', { username, password }),
+    push: (ops) => request('POST', '/sync/push', { ops }),
+    status: () => request('GET', '/sync/status'),
+    stockLevels: () => request('GET', '/sync/stock-levels'),
+  }
+}
+
+
+=== client\src\sync\attention.js ===
+import { db } from '../db/db'
+import { forgetVariantHash, rewindCursor } from './cursors'
+
+// The "needs attention" list: things the server refused for a reason that retrying
+// will not fix. They are kept here, and are never deleted from the device.
+
+export async function recordAttention(op, result) {
+  const id = `${op.kind}:${op.entityId}`
+  const existing = await db.syncQueue.get(id)
+  const now = new Date().toISOString()
+  await db.syncQueue.put({
+    id,
+    kind: op.kind,
+    entityId: op.entityId,
+    entityTime: op.entityTime,
+    label: op.label,
+    code: result.code ?? 'REJECTED',
+    message: result.message ?? '',
+    status: 'open',
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  })
+}
+
+export async function clearAttention(op) {
+  await db.syncQueue.delete(`${op.kind}:${op.entityId}`)
+}
+
+export function listAttention() {
+  return db.syncQueue.where('status').equals('open').sortBy('createdAt')
+}
+
+export async function dismissAttention(id) {
+  await db.syncQueue.update(id, {
+    status: 'dismissed',
+    updatedAt: new Date().toISOString(),
+  })
+}
+
+// Puts the item back in the queue, so the next sync sends it again.
+export async function retryAttention(item) {
+  if (item.kind === 'sale') {
+    await db.sales.update(item.entityId, {
+      syncStatus: 'pending',
+      syncMessage: '',
+    })
+  } else if (item.kind === 'variant') {
+    await forgetVariantHash(item.entityId)
+  } else {
+    await rewindCursor(item.kind, item.entityTime)
+  }
+  await db.syncQueue.delete(item.id)
+}
+
+export async function retryAllAttention() {
+  for (const item of await listAttention()) await retryAttention(item)
+}
+
+
+=== client\src\sync\backoff.js ===
+// How long to wait before the automatic retry, after this many failures in a row:
+// 30 seconds, 1 minute, 2 minutes... never more than 15 minutes.
+export function backoffMs(attempt) {
+  if (attempt <= 0) return 0
+  return Math.min(15 * 60 * 1000, 30_000 * 2 ** (attempt - 1))
+}
+
+
+=== client\src\sync\clock.js ===
+// Sales dated more than 10 minutes in the future are refused by the server, so a
+// wrong clock on this device would block them. Warn well before that.
+export const CLOCK_WARNING_MS = 2 * 60 * 1000
+
+// skewMs > 0 means this device's clock is AHEAD of the server's.
+export async function checkClock(api, now = () => Date.now()) {
+  const before = now()
+  const { serverTime } = await api.status()
+  const after = now()
+  const skewMs = Math.round((before + after) / 2 - Date.parse(serverTime))
+  return {
+    skewMs,
+    ok: Math.abs(skewMs) <= CLOCK_WARNING_MS,
+    checkedAt: new Date(after).toISOString(),
+  }
+}
+
+
+=== client\src\sync\collect.js ===
+import { db } from '../db/db'
+import { getCursor, getVariantHashes } from './cursors'
+import { movementOp, productOp, saleOp, variantOp } from './ops'
+
+const byKey = (a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)
+
+async function pendingCatalogAndStock() {
+  const productCursor = await getCursor('product')
+  const movementCursor = await getCursor('movement')
+  const hashes = await getVariantHashes()
+
+  const products = (await db.products.toArray())
+    .map(productOp)
+    .filter((op) => op.key > productCursor)
+    .sort(byKey)
+
+  // Only a change to an item's catalogue fields makes it pending. A stock change does not.
+  const variants = (await db.variants.toArray())
+    .map(variantOp)
+    .filter((op) => hashes[op.entityId] !== op.fingerprint)
+    .sort(byKey)
+
+  // Sale movements are not sent: the server makes its own when it saves the sale.
+  const movements = (await db.stockMovements.toArray())
+    .filter((m) => m.type !== 'sale')
+    .map(movementOp)
+    .filter((op) => op.key > movementCursor)
+    .sort(byKey)
+
+  return { products, variants, movements }
+}
+
+// Everything waiting to be sent, in the order the server needs it:
+// products, then items, then stock changes, then sales. Oldest first within each.
+export async function collectPending() {
+  const { products, variants, movements } = await pendingCatalogAndStock()
+
+  const sales = await db.sales.where('syncStatus').equals('pending').toArray()
+  const saleKey = (sale) => `${sale.createdAt}|${sale.id}`
+  sales.sort((a, b) =>
+    saleKey(a) < saleKey(b) ? -1 : saleKey(a) > saleKey(b) ? 1 : 0,
+  )
+
+  const saleOps = []
+  for (const sale of sales) {
+    const items = await db.saleItems.where('saleId').equals(sale.id).toArray()
+    saleOps.push(saleOp(sale, items))
+  }
+
+  return [...products, ...variants, ...movements, ...saleOps]
+}
+
+export function chunk(list, size) {
+  const batches = []
+  for (let i = 0; i < list.length; i += size)
+    batches.push(list.slice(i, i + size))
+  return batches
+}
+
+export async function countPending() {
+  const { products, variants, movements } = await pendingCatalogAndStock()
+  const sales = await db.sales.where('syncStatus').equals('pending').count()
+  const attention = await db.syncQueue.where('status').equals('open').count()
+  return {
+    products: products.length,
+    variants: variants.length,
+    movements: movements.length,
+    sales,
+    total: products.length + variants.length + movements.length + sales,
+    attention,
+  }
+}
+
+
+=== client\src\sync\cursors.js ===
+import { db } from '../db/db'
+
+// Products and stock changes are tracked with a cursor: "everything after this point
+// has been sent". Items are tracked by a fingerprint of their catalogue fields.
+const CURSOR_KEYS = {
+  product: 'sync.productCursor',
+  movement: 'sync.movementCursor',
+}
+const HASHES_KEY = 'sync.variantHashes'
+
+export async function getCursor(kind) {
+  return (await db.settings.get(CURSOR_KEYS[kind]))?.value ?? ''
+}
+
+export async function setCursor(kind, value) {
+  await db.settings.put({ key: CURSOR_KEYS[kind], value })
+}
+
+// Moves the cursor back so a rejected item is picked up again.
+export async function rewindCursor(kind, entityTime) {
+  const target = `${entityTime}|`
+  const current = await getCursor(kind)
+  if (target < current) await setCursor(kind, target)
+}
+
+export async function getVariantHashes() {
+  return (await db.settings.get(HASHES_KEY))?.value ?? {}
+}
+
+export async function markVariantsSynced(ops) {
+  if (ops.length === 0) return
+  const hashes = { ...(await getVariantHashes()) }
+  for (const op of ops) hashes[op.entityId] = op.fingerprint
+  await db.settings.put({ key: HASHES_KEY, value: hashes })
+}
+
+export async function forgetVariantHash(variantId) {
+  const hashes = { ...(await getVariantHashes()) }
+  delete hashes[variantId]
+  await db.settings.put({ key: HASHES_KEY, value: hashes })
+}
+
+
+=== client\src\sync\engine.js ===
+import { db } from '../db/db'
+import { AuthError, NetworkError } from './apiClient'
+import { clearAttention, recordAttention } from './attention'
+import { chunk, collectPending, countPending } from './collect'
+import { markVariantsSynced, setCursor } from './cursors'
+import { toRequestOp } from './ops'
+
+const BATCH_SIZE = 20
+
+let running = null
+
+// Sends everything that is waiting. Only one run happens at a time: a second call
+// while one is running simply waits for, and returns, the same run.
+//
+// outcome: 'ok' | 'offline' | 'auth' | 'server-error'
+export function runSync(options) {
+  if (running) return running
+  running = doSync(options).finally(() => {
+    running = null
+  })
+  return running
+}
+
+async function doSync({ api, batchSize = BATCH_SIZE }) {
+  const summary = {
+    outcome: 'ok',
+    sent: 0,
+    applied: 0,
+    duplicate: 0,
+    rejected: 0,
+    error: 0,
+    remaining: 0,
+    message: '',
+  }
+
+  const ops = await collectPending()
+
+  for (const batch of chunk(ops, batchSize)) {
+    let response
+    try {
+      response = await api.push(batch.map(toRequestOp))
+    } catch (err) {
+      if (err instanceof NetworkError) {
+        summary.outcome = 'offline'
+        summary.message = err.message
+      } else if (err instanceof AuthError) {
+        summary.outcome = 'auth'
+        summary.message = 'Your sign-in is no longer valid.'
+      } else {
+        summary.outcome = 'server-error'
+        summary.message = err?.message ?? 'The server returned an error.'
+      }
+      break
+    }
+
+    const results = response?.results
+    if (!Array.isArray(results) || results.length !== batch.length) {
+      summary.outcome = 'server-error'
+      summary.message = 'The server sent an unexpected answer.'
+      break
+    }
+
+    summary.sent += batch.length
+    const temporary = await applyBatchResults(batch, results, summary)
+    if (temporary) {
+      summary.outcome = 'server-error'
+      summary.message =
+        'The server had a temporary problem. It will be tried again.'
+      break
+    }
+  }
+
+  summary.remaining = (await countPending()).total
+  await saveLastRun(summary)
+  return summary
+}
+
+// Records what the server said about each operation. Returns true if any of them
+// hit a temporary error (those are tried again later).
+async function applyBatchResults(batch, results, summary) {
+  let temporary = false
+
+  for (let i = 0; i < batch.length; i += 1) {
+    const op = batch[i]
+    const result = results[i]
+
+    if (result?.status === 'applied' || result?.status === 'duplicate') {
+      summary[result.status] += 1
+      if (op.kind === 'sale') {
+        await db.sales.update(op.entityId, {
+          syncStatus: 'synced',
+          syncedAt: new Date().toISOString(),
+          syncFlags: result.flags ?? [],
+          syncMessage: '',
+        })
+      }
+      await clearAttention(op)
+    } else if (result?.status === 'rejected') {
+      summary.rejected += 1
+      await recordAttention(op, result)
+      if (op.kind === 'sale') {
+        await db.sales.update(op.entityId, {
+          syncStatus: 'review',
+          syncMessage: result.message ?? '',
+        })
+      }
+    } else {
+      summary.error += 1
+      temporary = true
+    }
+  }
+
+  // Only move forward when the whole batch is settled. Otherwise the batch is sent
+  // again next time, which is safe because the server ignores what it already has.
+  if (!temporary) await advance(batch)
+  return temporary
+}
+
+async function advance(batch) {
+  const lastKey = {}
+  for (const op of batch) {
+    if (op.kind === 'product' || op.kind === 'movement')
+      lastKey[op.kind] = op.key
+  }
+  for (const [kind, key] of Object.entries(lastKey)) await setCursor(kind, key)
+  await markVariantsSynced(batch.filter((op) => op.kind === 'variant'))
+}
+
+async function saveLastRun(summary) {
+  const at = new Date().toISOString()
+  await db.settings.put({
+    key: 'sync.lastRun',
+    value: {
+      at,
+      outcome: summary.outcome,
+      message: summary.message,
+      applied: summary.applied,
+      duplicate: summary.duplicate,
+      rejected: summary.rejected,
+      remaining: summary.remaining,
+    },
+  })
+  if (summary.outcome === 'ok' && summary.sent > 0) {
+    await db.settings.put({ key: 'sync.lastSuccessAt', value: at })
+  }
+}
+
+
+=== client\src\sync\ops.js ===
+// Turns rows from the device's database into the operations the server understands.
+// Each operation also carries a few fields for the engine's own use (kind, key, ...);
+// toRequestOp() removes them before anything is sent.
+
+// A short fingerprint of some text. It is used only to notice that an item's
+// catalogue fields changed. It is not security.
+export function fingerprint(text) {
+  let a = 0x811c9dc5
+  let b = 0x84222325
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i)
+    a = Math.imul(a ^ code, 0x01000193) >>> 0
+    b = Math.imul(b ^ code, 0x1b873593) >>> 0
+  }
+  return a.toString(16).padStart(8, '0') + b.toString(16).padStart(8, '0')
+}
+
+export const toRequestOp = ({ type, data }) => ({ type, data })
+
+export function productOp(product) {
+  return {
+    type: 'product.upsert',
+    data: {
+      id: product.id,
+      name: product.name,
+      category: product.category,
+      brand: product.brand ?? '',
+      supplier: product.supplier ?? '',
+      status: product.status,
+      discountAllowed: product.discountAllowed !== false,
+    },
+    kind: 'product',
+    entityId: product.id,
+    entityTime: product.updatedAt,
+    key: `${product.updatedAt}|${product.id}`,
+    label: product.name,
+  }
+}
+
+// Stock is deliberately NOT part of an item. It travels as movements and sales.
+const VARIANT_FIELDS = [
+  'productId',
+  'sku',
+  'barcode',
+  'size',
+  'costPaise',
+  'mrpPaise',
+  'sellingPricePaise',
+  'taxRatePercent',
+  'priceIncludesTax',
+  'reorderThreshold',
+  'status',
+]
+
+export function variantOp(variant) {
+  const v = {
+    ...variant,
+    taxRatePercent: variant.taxRatePercent ?? 0,
+    priceIncludesTax: variant.priceIncludesTax ?? true,
+    reorderThreshold: variant.reorderThreshold ?? 0,
+  }
+  const data = { id: v.id }
+  for (const field of VARIANT_FIELDS) data[field] = v[field]
+
+  return {
+    type: 'variant.upsert',
+    data,
+    kind: 'variant',
+    entityId: v.id,
+    entityTime: v.createdAt,
+    key: `${v.createdAt}|${v.id}`,
+    label: v.sku,
+    fingerprint: fingerprint(
+      JSON.stringify(VARIANT_FIELDS.map((field) => v[field])),
+    ),
+  }
+}
+
+export function movementOp(movement) {
+  const change = movement.quantityChange
+  return {
+    type: 'stock.movement',
+    data: {
+      id: movement.id,
+      variantId: movement.variantId,
+      type: movement.type,
+      quantityChange: change,
+      reason: String(movement.reason ?? '').slice(0, 200),
+      createdAt: movement.createdAt,
+    },
+    kind: 'movement',
+    entityId: movement.id,
+    entityTime: movement.createdAt,
+    key: `${movement.createdAt}|${movement.id}`,
+    label: `Stock ${movement.type} ${change > 0 ? '+' : ''}${change}`,
+  }
+}
+
+const discountOf = (discount) => ({
+  type: discount.type,
+  value: discount.value,
+})
+
+// The server recalculates every total itself. Only what the customer saw (the unit
+// prices and discounts), which items had discounts switched off, and the total the
+// device calculated (to compare) are sent.
+export function saleOp(sale, items) {
+  const lines = [...items]
+    .sort((a, b) => a.lineNumber - b.lineNumber)
+    .map((item) => ({
+      variantId: item.variantId,
+      quantity: item.quantity,
+      unitPricePaise: item.unitPricePaise,
+      ...(item.discount ? { discount: discountOf(item.discount) } : {}),
+      ...(item.discountExcluded ? { noDiscount: true } : {}),
+    }))
+
+  const payment = { method: sale.payment.method }
+  if (sale.payment.method === 'cash')
+    payment.amountTenderedPaise = sale.payment.amountTenderedPaise
+  if (sale.payment.reference) payment.reference = sale.payment.reference
+
+  return {
+    type: 'sale.create',
+    data: {
+      id: sale.id,
+      invoiceNumber: sale.invoiceNumber,
+      soldAt: sale.createdAt,
+      offline: true,
+      lines,
+      ...(sale.billDiscount
+        ? { billDiscount: discountOf(sale.billDiscount) }
+        : {}),
+      payment,
+      claimedTotalPaise: sale.totalPaise,
+    },
+    kind: 'sale',
+    entityId: sale.id,
+    entityTime: sale.createdAt,
+    key: `${sale.createdAt}|${sale.id}`,
+    label: sale.invoiceNumber,
+  }
+}
+
+
+=== client\src\sync\session.js ===
+// The sign-in is kept in localStorage, NOT in the database. That keeps the login
+// token out of backup files.
+export const SESSION_KEY = 'clothing-pos-session'
+
+const storage = () => globalThis.localStorage
+
+export function loadSession() {
+  try {
+    const raw = storage()?.getItem(SESSION_KEY)
+    if (!raw) return null
+    const session = JSON.parse(raw)
+    return session && typeof session.token === 'string' ? session : null
+  } catch {
+    return null
+  }
+}
+
+export function saveSession(session) {
+  try {
+    storage()?.setItem(SESSION_KEY, JSON.stringify(session))
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function clearSession() {
+  try {
+    storage()?.removeItem(SESSION_KEY)
+  } catch {
+    // nothing to do
+  }
+}
+
+// Reads the expiry time (in milliseconds) from a login token, or null.
+export function tokenExpiry(token) {
+  try {
+    const payload = token.split('.')[1]
+    const json = atob(payload.replace(/-/g, '+').replace(/_/g, '/'))
+    const { exp } = JSON.parse(json)
+    return typeof exp === 'number' ? exp * 1000 : null
+  } catch {
+    return null
+  }
+}
+
+export function isExpired(session, now = Date.now()) {
+  const expiry = tokenExpiry(session?.token ?? '')
+  return expiry !== null && expiry <= now
+}
+
+
+=== client\src\sync\stockCheck.js ===
+import { db } from '../db/db'
+
+// Compares this device's stock with the server's, item by item. Differences are
+// reported, never "fixed" automatically.
+export async function compareStock(api) {
+  const { items } = await api.stockLevels()
+  const server = new Map(items.map((item) => [item.variantId, item]))
+  const local = await db.variants.toArray()
+
+  const mismatches = []
+  for (const variant of local) {
+    const remote = server.get(variant.id)
+    if (!remote) {
+      mismatches.push({
+        variantId: variant.id,
+        sku: variant.sku,
+        local: variant.currentStock,
+        server: null,
+      })
+    } else if (remote.currentStock !== variant.currentStock) {
+      mismatches.push({
+        variantId: variant.id,
+        sku: variant.sku,
+        local: variant.currentStock,
+        server: remote.currentStock,
+      })
+    }
+  }
+
+  const localIds = new Set(local.map((variant) => variant.id))
+  const onlyOnServer = items
+    .filter((item) => !localIds.has(item.variantId))
+    .map((item) => ({
+      variantId: item.variantId,
+      sku: item.sku,
+      server: item.currentStock,
+    }))
+
+  return { checked: local.length, mismatches, onlyOnServer }
+}
+
+
+=== client\src\sync\SyncProvider.jsx ===
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { useLiveQuery } from 'dexie-react-hooks'
+import { db } from '../db/db'
+import { useOnlineStatus } from '../pwa/usePwa'
+import { createApiClient } from './apiClient'
+import { backoffMs } from './backoff'
+import { checkClock } from './clock'
+import { countPending } from './collect'
+import { runSync } from './engine'
+import { clearSession, isExpired, loadSession, saveSession } from './session'
+
+export const SyncContext = createContext(null)
+
+export function useSync() {
+    const value = useContext(SyncContext)
+    if (!value) throw new Error('useSync must be used inside SyncProvider')
+    return value
+}
+
+const EMPTY_COUNTS = {
+    products: 0,
+    variants: 0,
+    movements: 0,
+    sales: 0,
+    total: 0,
+    attention: 0,
+}
+
+// `api`, `autoSync`, `autoDelayMs` and `intervalMs` can be replaced in tests.
+export default function SyncProvider({
+    children,
+    api: apiProp,
+    autoSync = true,
+    autoDelayMs = 2000,
+    intervalMs = 60_000,
+}) {
+    const [session, setSession] = useState(() => loadSession())
+    const sessionRef = useRef(session)
+    const online = useOnlineStatus()
+    const [syncing, setSyncing] = useState(false)
+    const [clock, setClock] = useState(null)
+    const [notice, setNotice] = useState('')
+    const busy = useRef(false)
+    const retry = useRef({ attempt: 0, at: 0 })
+
+    const api = useMemo(
+        () => apiProp ?? createApiClient({ getToken: () => sessionRef.current?.token ?? null }),
+        [apiProp],
+    )
+
+    const counts = useLiveQuery(() => countPending(), []) ?? EMPTY_COUNTS
+    const lastRun = useLiveQuery(async () => (await db.settings.get('sync.lastRun'))?.value ?? null, [])
+    const lastSuccessAt = useLiveQuery(
+        async () => (await db.settings.get('sync.lastSuccessAt'))?.value ?? null,
+        [],
+    )
+
+    const updateSession = useCallback((next) => {
+        sessionRef.current = next
+        setSession(next)
+    }, [])
+
+    const endSession = useCallback(
+        (message) => {
+            clearSession()
+            updateSession(null)
+            setNotice(message)
+        },
+        [updateSession],
+    )
+
+    const signedIn = Boolean(session) && !isExpired(session)
+
+    const run = useCallback(
+        async ({ manual = false } = {}) => {
+            const current = sessionRef.current
+            if (busy.current || !current) return null
+            if (isExpired(current)) {
+                endSession('Your sign-in has expired. Please sign in again to sync.')
+                return null
+            }
+            if (!manual && Date.now() < retry.current.at) return null
+
+            busy.current = true
+            setSyncing(true)
+            try {
+                let summary
+                try {
+                    summary = await runSync({ api })
+                } catch (err) {
+                    console.error('Sync stopped because of a problem on this device', err)
+                    summary = { outcome: 'server-error', sent: 0, message: 'Sync stopped because of a problem on this device.' }
+                }
+
+                if (summary.outcome === 'ok') {
+                    retry.current = { attempt: 0, at: 0 }
+                    setNotice('')
+                    if (summary.sent > 0 || manual) {
+                        try {
+                            setClock(await checkClock(api))
+                        } catch {
+                            // the clock check is optional
+                        }
+                    }
+                } else if (summary.outcome === 'auth') {
+                    endSession('Your sign-in is no longer valid. Please sign in again to sync.')
+                } else {
+                    const attempt = retry.current.attempt + 1
+                    retry.current = { attempt, at: Date.now() + backoffMs(attempt) }
+                    setNotice(summary.message)
+                }
+                return summary
+            } finally {
+                busy.current = false
+                setSyncing(false)
+            }
+        },
+        [api, endSession],
+    )
+
+    // Sync shortly after something becomes pending, or when we come back online.
+    useEffect(() => {
+        if (!autoSync || !session || !online || counts.total === 0) return undefined
+        const timer = setTimeout(() => {
+            run()
+        }, autoDelayMs)
+        return () => clearTimeout(timer)
+    }, [autoSync, session, online, counts.total, run, autoDelayMs])
+
+    // A safety net: check again every minute (retries wait for their back-off time).
+    useEffect(() => {
+        if (!autoSync || !session) return undefined
+        const timer = setInterval(() => {
+            run()
+        }, intervalMs)
+        return () => clearInterval(timer)
+    }, [autoSync, session, run, intervalMs])
+
+    const signIn = useCallback(
+        async (username, password) => {
+            const { token, user } = await api.login(username, password)
+            const next = { token, user, signedInAt: new Date().toISOString() }
+            saveSession(next)
+            updateSession(next)
+            retry.current = { attempt: 0, at: 0 }
+            setNotice('')
+            return next
+        },
+        [api, updateSession],
+    )
+
+    const signOut = useCallback(() => {
+        clearSession()
+        updateSession(null)
+        setNotice('')
+    }, [updateSession])
+
+    const value = useMemo(
+        () => ({
+            session,
+            signedIn,
+            online,
+            syncing,
+            counts,
+            lastRun: lastRun ?? null,
+            lastSuccessAt: lastSuccessAt ?? null,
+            clock,
+            notice,
+            api,
+            signIn,
+            signOut,
+            syncNow: () => run({ manual: true }),
+        }),
+        [session, signedIn, online, syncing, counts, lastRun, lastSuccessAt, clock, notice, api, signIn, signOut, run],
+    )
+
+    return <SyncContext.Provider value={value}>{children}</SyncContext.Provider>
+}
+
+

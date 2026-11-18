@@ -14,7 +14,7 @@ export async function nextSequence(name, session) {
   const counter = await Counter.findOneAndUpdate(
     { _id: name },
     { $inc: { seq: 1 } },
-    { new: true, upsert: true, session },
+    { returnDocument: "after", upsert: true, session },
   );
   return counter.seq;
 }

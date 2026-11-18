@@ -80,14 +80,6 @@ test("rejects bad variant input", async () => {
   const admin = await createUser();
   const product = await makeProduct();
 
-  const overMrp = await addVariant(
-    admin.token,
-    product._id,
-    variantBody({ sellingPricePaise: 120000 }),
-  );
-  expect(overMrp.status).toBe(400);
-  expect(overMrp.body.error.details[0].field).toBe("sellingPricePaise");
-
   const bad = [
     variantBody({ costPaise: -1 }),
     variantBody({ costPaise: 10.5 }),
@@ -95,7 +87,12 @@ test("rejects bad variant input", async () => {
     variantBody({ barcode: "has space" }),
     variantBody({ openingStock: -2 }),
     variantBody({ currentStock: 50 }),
-    { ...variantBody(), sku: undefined },
+    variantBody({ size: "x".repeat(51) }),
+    variantBody({ unit: "kg" }),
+    variantBody({ packSize: 0 }),
+    variantBody({ packSize: 1.5 }),
+    { ...variantBody(), sellingPricePaise: undefined },
+    { ...variantBody(), barcode: undefined },
   ];
   for (const body of bad) {
     expect((await addVariant(admin.token, product._id, body)).status).toBe(400);
@@ -103,7 +100,7 @@ test("rejects bad variant input", async () => {
   expect(await Variant.countDocuments()).toBe(0);
 });
 
-test("refuses a duplicate barcode, SKU or size, and saves nothing from a refused request", async () => {
+test("refuses only a duplicate barcode, and saves nothing from a refused request", async () => {
   const admin = await createUser();
   const product = await makeProduct();
   expect((await addVariant(admin.token, product._id)).status).toBe(201);
@@ -116,24 +113,25 @@ test("refuses a duplicate barcode, SKU or size, and saves nothing from a refused
   expect(barcode.status).toBe(409);
   expect(barcode.body.error.code).toBe("DUPLICATE_BARCODE");
 
-  const sku = await addVariant(
+  expect(await Variant.countDocuments()).toBe(1);
+  expect(await StockMovement.countDocuments()).toBe(1); // only the first one's opening stock
+
+  // The same SKU, or the same product and size, are fine: each entry has its own barcode.
+  const sameSku = await addVariant(
     admin.token,
     product._id,
     variantBody({ barcode: "CLO000002", size: "L" }),
   );
-  expect(sku.status).toBe(409);
-  expect(sku.body.error.code).toBe("DUPLICATE_SKU");
+  expect(sameSku.status).toBe(201);
 
-  const size = await addVariant(
+  const sameSize = await addVariant(
     admin.token,
     product._id,
     variantBody({ sku: "OTHER-2", barcode: "CLO000003" }),
   );
-  expect(size.status).toBe(409);
-  expect(size.body.error.code).toBe("DUPLICATE_VARIANT");
+  expect(sameSize.status).toBe(201);
 
-  expect(await Variant.countDocuments()).toBe(1);
-  expect(await StockMovement.countDocuments()).toBe(1); // only the first one's opening stock
+  expect(await Variant.countDocuments()).toBe(3);
 });
 
 test("the same size can exist under a different product", async () => {
@@ -233,26 +231,22 @@ test("an update changes prices and the audit log keeps the old and new values", 
   });
 });
 
-test("an update cannot push the selling price above the MRP", async () => {
+test("an update may put the selling price above the MRP", async () => {
   const admin = await createUser();
   const product = await makeProduct();
   const variant = await makeVariant(product._id); // MRP 99900, selling 79900
 
-  expect(
-    (
-      await patch(`/api/variants/${variant._id}`, admin.token, {
-        sellingPricePaise: 120000,
-      })
-    ).status,
-  ).toBe(400);
-  expect(
-    (
-      await patch(`/api/variants/${variant._id}`, admin.token, {
-        mrpPaise: 50000,
-      })
-    ).status,
-  ).toBe(400);
-  expect((await Variant.findById(variant._id)).mrpPaise).toBe(99900);
+  const higher = await patch(`/api/variants/${variant._id}`, admin.token, {
+    sellingPricePaise: 120000,
+  });
+  expect(higher.status).toBe(200);
+  expect((await Variant.findById(variant._id)).sellingPricePaise).toBe(120000);
+
+  const lowerMrp = await patch(`/api/variants/${variant._id}`, admin.token, {
+    mrpPaise: 50000,
+  });
+  expect(lowerMrp.status).toBe(200);
+  expect((await Variant.findById(variant._id)).mrpPaise).toBe(50000);
 });
 
 test("stock cannot be changed through a variant update", async () => {
@@ -342,3 +336,138 @@ test("fetching a variant by id works, and an unknown id gives 404", async () => 
   expect((await get("/api/variants/missing", admin.token)).status).toBe(404);
 });
 
+// ---- New rules ----
+
+test("a selling price above the MRP is allowed", async () => {
+  const admin = await createUser();
+  const product = await makeProduct();
+
+  const res = await addVariant(
+    admin.token,
+    product._id,
+    variantBody({ sellingPricePaise: 120000 }), // MRP is 99900
+  );
+
+  expect(res.status).toBe(201);
+  expect(res.body.variant).toMatchObject({
+    sellingPricePaise: 120000,
+    mrpPaise: 99900,
+  });
+});
+
+test("only the barcode and the selling price are needed: the SKU, size, cost and MRP are optional", async () => {
+  const admin = await createUser();
+  const product = await makeProduct();
+
+  const res = await addVariant(admin.token, product._id, {
+    barcode: "CLO000020",
+    sellingPricePaise: 59900,
+  });
+
+  expect(res.status).toBe(201);
+  expect(res.body.variant).toMatchObject({
+    sku: "CLO000020", // the barcode, when no SKU is given
+    size: "",
+    unit: "piece",
+    costPaise: 0,
+    mrpPaise: 59900, // the selling price, when no MRP is given
+    currentStock: 0,
+    packSize: null,
+  });
+  expect(await StockMovement.countDocuments()).toBe(0);
+});
+
+test("any size text, and the same product and size and SKU many times", async () => {
+  const admin = await createUser();
+  const product = await makeProduct();
+
+  const sizes = ["", "2-3 years", "Free size", "M", "M", "m"];
+  for (const [index, size] of sizes.entries()) {
+    const res = await addVariant(
+      admin.token,
+      product._id,
+      variantBody({ sku: "SAME", barcode: `CLO0000${30 + index}`, size }),
+    );
+    expect(res.status).toBe(201);
+  }
+
+  expect(await Variant.countDocuments()).toBe(6);
+});
+
+test("fabric is saved by the meter, with its stock in centimetres", async () => {
+  const admin = await createUser();
+  const product = await makeProduct({ name: "Pant Piece" });
+
+  const res = await addVariant(
+    admin.token,
+    product._id,
+    variantBody({
+      sku: "FAB-1",
+      barcode: "CLO000040",
+      size: "Grey 101",
+      unit: "meter",
+      sellingPricePaise: 45000,
+      mrpPaise: 45000,
+      openingStock: 2550,
+      reorderThreshold: 300,
+    }),
+  );
+
+  expect(res.status).toBe(201);
+  expect(res.body.variant).toMatchObject({ unit: "meter", currentStock: 2550 });
+  const movement = await StockMovement.findOne({
+    variantId: res.body.variant.id,
+  });
+  expect(movement).toMatchObject({ type: "opening", quantityChange: 2550 });
+
+  const fetched = await get(
+    `/api/variants/${res.body.variant.id}`,
+    admin.token,
+  );
+  expect(fetched.body.variant.unit).toBe("meter");
+});
+
+test("a box size is kept and can be changed, but not set to zero", async () => {
+  const admin = await createUser();
+  const product = await makeProduct();
+
+  const created = await addVariant(
+    admin.token,
+    product._id,
+    variantBody({
+      barcode: "CLO000050",
+      sku: "BOX-1",
+      packSize: 10,
+      openingStock: 40,
+    }),
+  );
+  expect(created.status).toBe(201);
+  expect(created.body.variant).toMatchObject({
+    packSize: 10,
+    currentStock: 40,
+  });
+
+  const id = created.body.variant.id;
+  const changed = await patch(`/api/variants/${id}`, admin.token, {
+    packSize: 12,
+  });
+  expect(changed.status).toBe(200);
+  expect(changed.body.variant.packSize).toBe(12);
+
+  expect(
+    (await patch(`/api/variants/${id}`, admin.token, { packSize: 0 })).status,
+  ).toBe(400);
+});
+
+test("the unit (piece or meter) cannot be changed by an update", async () => {
+  const admin = await createUser();
+  const product = await makeProduct();
+  const variant = await makeVariant(product._id);
+
+  const res = await patch(`/api/variants/${variant._id}`, admin.token, {
+    unit: "meter",
+  });
+
+  expect(res.status).toBe(400);
+  expect((await Variant.findById(variant._id)).unit).toBe("piece");
+});

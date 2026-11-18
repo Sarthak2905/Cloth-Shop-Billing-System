@@ -44,6 +44,10 @@ export async function retryAttention(item) {
       syncStatus: 'pending',
       syncMessage: '',
     })
+  } else if (item.kind === 'salepay') {
+    await db.sales.update(item.entityId, { paymentPending: 1 })
+  } else if (item.kind === 'salecancel') {
+    await db.sales.update(item.entityId, { cancelPending: 1 })
   } else if (item.kind === 'variant') {
     await forgetVariantHash(item.entityId)
   } else {

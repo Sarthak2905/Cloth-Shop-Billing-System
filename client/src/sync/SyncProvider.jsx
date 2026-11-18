@@ -22,17 +22,22 @@ const EMPTY_COUNTS = {
     variants: 0,
     movements: 0,
     sales: 0,
+    payments: 0,
+    cancels: 0,
     total: 0,
     attention: 0,
 }
 
-// `api`, `autoSync`, `autoDelayMs` and `intervalMs` can be replaced in tests.
+// `api`, `autoSync`, `autoDelayMs`, `intervalMs` and `firstSyncManual` can be replaced in
+// tests. With `firstSyncManual` (the default) nothing is sent by itself until the first
+// sync has been started by hand and has worked: it is a deliberate step, after a backup.
 export default function SyncProvider({
     children,
     api: apiProp,
     autoSync = true,
     autoDelayMs = 2000,
     intervalMs = 60_000,
+    firstSyncManual = true,
 }) {
     const [session, setSession] = useState(() => loadSession())
     const sessionRef = useRef(session)
@@ -70,6 +75,8 @@ export default function SyncProvider({
     )
 
     const signedIn = Boolean(session) && !isExpired(session)
+    // Automatic syncing starts only after the first sync worked (when it must be manual).
+    const autoAllowed = autoSync && (!firstSyncManual || Boolean(lastSuccessAt))
 
     const run = useCallback(
         async ({ manual = false } = {}) => {
@@ -120,21 +127,21 @@ export default function SyncProvider({
 
     // Sync shortly after something becomes pending, or when we come back online.
     useEffect(() => {
-        if (!autoSync || !session || !online || counts.total === 0) return undefined
+        if (!autoAllowed || !session || !online || counts.total === 0) return undefined
         const timer = setTimeout(() => {
             run()
         }, autoDelayMs)
         return () => clearTimeout(timer)
-    }, [autoSync, session, online, counts.total, run, autoDelayMs])
+    }, [autoAllowed, session, online, counts.total, run, autoDelayMs])
 
     // A safety net: check again every minute (retries wait for their back-off time).
     useEffect(() => {
-        if (!autoSync || !session) return undefined
+        if (!autoAllowed || !session) return undefined
         const timer = setInterval(() => {
             run()
         }, intervalMs)
         return () => clearInterval(timer)
-    }, [autoSync, session, run, intervalMs])
+    }, [autoAllowed, session, run, intervalMs])
 
     const signIn = useCallback(
         async (username, password) => {

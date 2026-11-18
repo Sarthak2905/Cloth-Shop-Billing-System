@@ -50,7 +50,7 @@ async function seedAndSell() {
 
 function renderProvider(api) {
   return render(
-    <SyncProvider api={api} autoDelayMs={10} intervalMs={30}>
+    <SyncProvider api={api} autoDelayMs={10} intervalMs={30} firstSyncManual={false}>
       <Consumer />
     </SyncProvider>,
   )

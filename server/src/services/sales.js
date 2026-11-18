@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { runInTransaction } from "../db/transaction.js";
-import { calculateTotals } from "../domain/calc.js";
+import { calculateTotals, lineGrossPaise } from "../domain/calc.js";
+import { summarizePayments } from "../domain/payments.js";
 import { AppError, conflict } from "../errors.js";
 import { nextSequence } from "../models/Counter.js";
 import { Product } from "../models/Product.js";
@@ -17,14 +18,24 @@ const invalid = (field, message) =>
   ]);
 
 // A fingerprint of what the sale says. The same id with different content is refused.
+// The payment is NOT part of it (it can be recorded or changed later), except for the
+// older single `payment`.
 function fingerprintOf(data) {
   const lines = data.lines
-    .map((l) => [l.variantId, l.quantity, l.unitPricePaise, l.discount ?? null])
+    .map((l) => [
+      l.variantId,
+      l.quantity,
+      l.unitPricePaise,
+      l.discount ?? null,
+      l.noDiscount === true,
+    ])
     .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   const canonical = {
     lines,
     billDiscount: data.billDiscount ?? null,
-    payment: [data.payment.method, data.payment.amountTenderedPaise ?? null],
+    legacyPayment: data.payment
+      ? [data.payment.method, data.payment.amountTenderedPaise ?? null]
+      : null,
     invoiceNumber: data.invoiceNumber ?? null,
   };
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
@@ -113,7 +124,7 @@ async function saveSale({
       );
     }
     const product = productById.get(variant.productId);
-    const label = `${product?.name ?? "Item"} (size ${variant.size})`;
+    const label = `${product?.name ?? "Item"}${variant.size ? ` (size ${variant.size})` : ""}`;
 
     if (variant.status !== "active" || product?.status !== "active") {
       violations.push({
@@ -136,29 +147,45 @@ async function saveSale({
         message: `${label} was sold above its MRP`,
       });
     }
-    return { line, variant, product };
+
+    // A product that never takes a discount. An offline sale carries its own decision
+    // (noDiscount); an online sale follows the product.
+    const neverDiscounted = product?.discountAllowed === false;
+    if (neverDiscounted && line.discount) {
+      violations.push({
+        code: "DISCOUNT_NOT_ALLOWED",
+        variantId: variant._id,
+        message: `${label} does not allow discounts`,
+      });
+    }
+    const excluded = line.noDiscount === true || neverDiscounted;
+    return { line, variant, product, label, excluded };
   });
 
-  // 5. The server's own calculation. Tax settings come from the catalogue.
+  // 5. The server's own calculation. Tax settings and the unit come from the catalogue.
   const options = { roundToRupee: settings.roundToRupee };
   const cart = {
-    lines: lineViews.map(({ line, variant }) => ({
+    lines: lineViews.map(({ line, variant, excluded }) => ({
       variantId: variant._id,
+      unit: variant.unit ?? "piece",
       unitPricePaise: line.unitPricePaise,
       quantity: line.quantity,
       taxRatePercent: variant.taxRatePercent,
       priceIncludesTax: variant.priceIncludesTax,
       discount: line.discount ?? null,
+      discountExcluded: excluded,
     })),
     billDiscount: data.billDiscount ?? null,
   };
 
   // Impossible discounts are refused in every mode.
-  for (const { line } of lineViews) {
-    if (
-      line.discount?.type === "amount" &&
-      line.discount.value > line.unitPricePaise * line.quantity
-    ) {
+  for (const { line, variant } of lineViews) {
+    const gross = lineGrossPaise({
+      unit: variant.unit ?? "piece",
+      unitPricePaise: line.unitPricePaise,
+      quantity: line.quantity,
+    });
+    if (line.discount?.type === "amount" && line.discount.value > gross) {
       throw invalid("lines", "A discount cannot be more than the item total");
     }
   }
@@ -166,18 +193,38 @@ async function saveSale({
     { ...cart, billDiscount: null },
     options,
   );
-  if (
-    cart.billDiscount?.type === "amount" &&
-    cart.billDiscount.value >
-      beforeBillDiscount.subtotalPaise - beforeBillDiscount.itemDiscountPaise
-  ) {
-    throw invalid(
-      "billDiscount",
-      "A discount cannot be more than the bill total",
-    );
+  if (cart.billDiscount) {
+    if (beforeBillDiscount.eligibleBasePaise === 0) {
+      violations.push({
+        code: "DISCOUNT_NOT_ALLOWED",
+        message: "No item on this bill can take a bill discount",
+      });
+    } else if (
+      cart.billDiscount.type === "amount" &&
+      cart.billDiscount.value > beforeBillDiscount.eligibleBasePaise
+    ) {
+      throw invalid(
+        "billDiscount",
+        "A discount cannot be more than the bill total",
+      );
+    }
   }
 
   const totals = calculateTotals(cart, options);
+
+  // A never-discounted product that still got a share of the bill discount.
+  lineViews.forEach(({ variant, product, label }, index) => {
+    if (
+      product?.discountAllowed === false &&
+      totals.lines[index].billDiscountSharePaise > 0
+    ) {
+      violations.push({
+        code: "DISCOUNT_NOT_ALLOWED",
+        variantId: variant._id,
+        message: `${label} does not allow discounts`,
+      });
+    }
+  });
 
   // 6. Cashier discount limit (admins are not limited). A little slack for rounding.
   if (user.role === "cashier") {
@@ -205,25 +252,40 @@ async function saveSale({
     });
   }
 
-  // 8. Payment.
-  const isCash = data.payment.method === "cash";
-  const tendered = isCash
-    ? (data.payment.amountTenderedPaise ?? totals.totalPaise)
-    : totals.totalPaise;
-  let changePaise = 0;
-  if (tendered < totals.totalPaise) {
-    if (!offline)
-      throw new AppError(
-        400,
-        "INSUFFICIENT_PAYMENT",
-        "Cash received is less than the total",
-      );
-    violations.push({
-      code: "PAYMENT_SHORT",
-      message: `The amount received (${tendered}) is less than the total (${totals.totalPaise})`,
-    });
+  // 8. Payment. Three shapes: a list (cash + UPI + card; empty = pending), the older
+  //    single payment, or none (= pending, paid later). A short amount is a bargain and is
+  //    accepted; the older single payment keeps its old rule.
+  let paid;
+  if (Array.isArray(data.payments)) {
+    paid = summarizePayments(totals.totalPaise, data.payments);
+    if (paid.error) throw invalid("payments", paid.error);
+  } else if (data.payment) {
+    const isCash = data.payment.method === "cash";
+    const tendered = isCash
+      ? (data.payment.amountTenderedPaise ?? totals.totalPaise)
+      : totals.totalPaise;
+    if (tendered < totals.totalPaise) {
+      if (!offline)
+        throw new AppError(
+          400,
+          "INSUFFICIENT_PAYMENT",
+          "Cash received is less than the total",
+        );
+      violations.push({
+        code: "PAYMENT_SHORT",
+        message: `The amount received (${tendered}) is less than the total (${totals.totalPaise})`,
+      });
+    }
+    paid = summarizePayments(totals.totalPaise, [
+      {
+        method: data.payment.method,
+        amountPaise: tendered,
+        reference: data.payment.reference,
+      },
+    ]);
+    if (paid.error) throw invalid("payment", paid.error);
   } else {
-    changePaise = tendered - totals.totalPaise;
+    paid = summarizePayments(totals.totalPaise, []);
   }
 
   // 9. An online sale that breaks any rule is refused. An offline one is flagged.
@@ -262,13 +324,13 @@ async function saveSale({
       flags.push({
         code: "STOCK_SHORTFALL",
         variantId: variant._id,
-        message: `${variant.sku} is now ${-after.currentStock} below zero`,
+        message: `${variant.sku || variant.barcode} is now ${-after.currentStock} below zero`,
       });
     }
   }
 
   // 12. Save the sale with a snapshot of every line.
-  const items = lineViews.map(({ line, variant, product }, index) => {
+  const items = lineViews.map(({ line, variant, product, excluded }, index) => {
     const t = totals.lines[index];
     return {
       lineNumber: index + 1,
@@ -278,13 +340,17 @@ async function saveSale({
       sku: variant.sku,
       barcode: variant.barcode,
       size: variant.size,
+      unit: variant.unit ?? "piece",
       quantity: line.quantity,
       unitPricePaise: line.unitPricePaise,
       mrpPaise: variant.mrpPaise,
-      costPaise: variant.costPaise,
+      // what it cost when it was sold (the device's own record when it sent one)
+      costPaise: line.costPaise ?? variant.costPaise,
       taxRatePercent: variant.taxRatePercent,
       priceIncludesTax: variant.priceIncludesTax,
       discount: line.discount ?? null,
+      discountAllowed: product?.discountAllowed !== false,
+      discountExcluded: excluded,
       grossPaise: t.grossPaise,
       lineDiscountPaise: t.lineDiscountPaise,
       billDiscountSharePaise: t.billDiscountSharePaise,
@@ -300,6 +366,8 @@ async function saveSale({
         _id: data.id,
         invoiceNumber,
         status: "completed",
+        replacesSaleId: data.replacesSaleId ?? null,
+        replacesInvoice: data.replacesInvoice ?? "",
         source: offline ? "offline-sync" : "online",
         soldAt,
         cashierId: user._id,
@@ -325,11 +393,16 @@ async function saveSale({
         roundOffPaise: totals.roundOffPaise,
         totalPaise: totals.totalPaise,
         payment: {
-          method: data.payment.method,
-          amountTenderedPaise: tendered,
-          changePaise,
-          reference: data.payment.reference ?? "",
+          method: paid.summary.method,
+          amountTenderedPaise: paid.summary.amountTenderedPaise,
+          changePaise: paid.summary.changePaise,
+          reference: paid.summary.reference,
         },
+        payments: paid.payments,
+        paymentStatus: paid.status,
+        receivedPaise: paid.receivedPaise,
+        shortPaise: paid.shortPaise,
+        paymentRecordedAt: paid.status === "paid" ? soldAt : null,
         items,
         flags,
         flagged: flags.length > 0,

@@ -56,6 +56,7 @@ export async function createSale({ id, cart, payment, payments }) {
     db.stockMovements,
     db.settings,
     async () => {
+      const costByVariant = new Map() // what each item cost when it was sold
       const existing = await db.sales.get(id)
       if (existing) {
         const items = await db.saleItems.where('saleId').equals(id).toArray()
@@ -65,6 +66,7 @@ export async function createSale({ id, cart, payment, payments }) {
 
       for (const line of cart.lines) {
         const variant = await db.variants.get(line.variantId)
+        if (variant) costByVariant.set(line.variantId, variant.costPaise ?? 0)
         if (!variant || variant.status !== 'active') {
           throw new AppError(
             'ITEM_UNAVAILABLE',
@@ -165,6 +167,7 @@ export async function createSale({ id, cart, payment, payments }) {
           unit: line.unit ?? 'piece',
           unitPricePaise: line.unitPricePaise,
           mrpPaise: line.mrpPaise,
+          costPaise: costByVariant.get(line.variantId) ?? 0,
           taxRatePercent: line.taxRatePercent,
           priceIncludesTax: line.priceIncludesTax,
           discount: line.discount ?? null,

@@ -1,0 +1,956 @@
+﻿=== server\src\domain\calc.js ===
+// All amounts are integer paise. Percentages and tax rates are converted to
+// basis points (1% = 100 bp) so no floating-point money is ever used.
+
+// Integer division rounded half-up. Only for non-negative numbers.
+export function divRound(numerator, denominator) {
+  return Math.floor((2 * numerator + denominator) / (2 * denominator))
+}
+
+const toBasisPoints = (percent) => Math.round(percent * 100)
+
+// Splits `totalPaise` across `weights` in proportion, with no paisa lost:
+// every share is rounded down, then the leftover paise go to the largest
+// remainders. The shares always add up to exactly `totalPaise`.
+export function allocateProportionally(totalPaise, weights) {
+  const sum = weights.reduce((a, b) => a + b, 0)
+  if (totalPaise <= 0 || sum <= 0) return weights.map(() => 0)
+
+  const total = BigInt(totalPaise)
+  const weightSum = BigInt(sum)
+  const shares = weights.map((w) => Number((total * BigInt(w)) / weightSum))
+  const remainders = weights.map((w, index) => ({
+    index,
+    remainder: (total * BigInt(w)) % weightSum,
+  }))
+
+  const leftover = totalPaise - shares.reduce((a, b) => a + b, 0)
+  remainders.sort((a, b) => {
+    if (a.remainder === b.remainder) return a.index - b.index
+    return a.remainder > b.remainder ? -1 : 1
+  })
+  for (let k = 0; k < leftover; k += 1) shares[remainders[k].index] += 1
+  return shares
+}
+
+// A discount is { type: 'percent', value: 10 } or { type: 'amount', value: 10000 }
+// (amount is in paise). The result can never exceed the amount it applies to.
+export function discountAmount(discount, basePaise) {
+  if (!discount || basePaise <= 0) return 0
+  if (discount.type === 'percent') {
+    return divRound(basePaise * toBasisPoints(discount.value), 10000)
+  }
+  return Math.min(discount.value, basePaise)
+}
+
+export function calculateTotals(cart, { roundToRupee = true } = {}) {
+  const base = cart.lines.map((line) => {
+    const grossPaise = line.unitPricePaise * line.quantity
+    const lineDiscountPaise = discountAmount(line.discount, grossPaise)
+    return {
+      line,
+      grossPaise,
+      lineDiscountPaise,
+      afterItemPaise: grossPaise - lineDiscountPaise,
+    }
+  })
+
+  const afterItemTotal = base.reduce((sum, b) => sum + b.afterItemPaise, 0)
+  const billDiscountPaise = discountAmount(cart.billDiscount, afterItemTotal)
+  const shares = allocateProportionally(
+    billDiscountPaise,
+    base.map((b) => b.afterItemPaise),
+  )
+
+  const lines = base.map((b, i) => {
+    const netPaise = b.afterItemPaise - shares[i]
+    const bp = toBasisPoints(b.line.taxRatePercent ?? 0)
+    const taxIncluded = b.line.priceIncludesTax ?? true
+
+    let taxPaise
+    let taxableValuePaise
+    let lineTotalPaise
+    if (taxIncluded) {
+      taxPaise = divRound(netPaise * bp, 10000 + bp)
+      taxableValuePaise = netPaise - taxPaise
+      lineTotalPaise = netPaise
+    } else {
+      taxPaise = divRound(netPaise * bp, 10000)
+      taxableValuePaise = netPaise
+      lineTotalPaise = netPaise + taxPaise
+    }
+
+    return {
+      variantId: b.line.variantId,
+      quantity: b.line.quantity,
+      unitPricePaise: b.line.unitPricePaise,
+      grossPaise: b.grossPaise,
+      lineDiscountPaise: b.lineDiscountPaise,
+      billDiscountSharePaise: shares[i],
+      netPaise,
+      taxableValuePaise,
+      taxPaise,
+      taxIncluded,
+      lineTotalPaise,
+    }
+  })
+
+  const sum = (key) => lines.reduce((total, l) => total + l[key], 0)
+  const taxPaise = sum('taxPaise')
+  const taxIncludedPaise = lines
+    .filter((l) => l.taxIncluded)
+    .reduce((total, l) => total + l.taxPaise, 0)
+  const exactTotalPaise = sum('lineTotalPaise')
+  const totalPaise = roundToRupee
+    ? divRound(exactTotalPaise, 100) * 100
+    : exactTotalPaise
+
+  return {
+    lines,
+    itemCount: lines.reduce((total, l) => total + l.quantity, 0),
+    subtotalPaise: sum('grossPaise'),
+    itemDiscountPaise: sum('lineDiscountPaise'),
+    billDiscountPaise,
+    discountPaise: sum('lineDiscountPaise') + billDiscountPaise,
+    taxableValuePaise: sum('taxableValuePaise'),
+    taxPaise,
+    taxIncludedPaise,
+    taxAddedPaise: taxPaise - taxIncludedPaise,
+    exactTotalPaise,
+    roundOffPaise: totalPaise - exactTotalPaise,
+    totalPaise,
+  }
+}
+
+
+=== server\src\domain\catalogSchemas.js ===
+import { z } from "zod";
+
+// These mirror the rules in the app. There are no .default() values here on purpose:
+// defaults would overwrite existing data when a field is simply left out of an update.
+
+const text = (max) => z.string().trim().min(1).max(max);
+const paise = z.number().int().min(0).max(100_000_000);
+
+const productFields = {
+  name: text(120),
+  category: text(60),
+  brand: z.string().trim().max(60),
+  supplier: z.string().trim().max(120),
+};
+
+export const productCreateSchema = z
+  .object({
+    id: z.string().uuid().optional(),
+    ...productFields,
+    brand: productFields.brand.optional(),
+    supplier: productFields.supplier.optional(),
+  })
+  .strict();
+
+export const productUpdateSchema = z
+  .object(productFields)
+  .partial()
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "Nothing to update",
+  });
+
+const variantFields = {
+  sku: text(40),
+  barcode: z
+    .string()
+    .trim()
+    .min(4, "Barcode too short")
+    .max(48)
+    .regex(/^[A-Za-z0-9\-_.]+$/, "Barcode has invalid characters"),
+  size: text(20),
+  costPaise: paise,
+  mrpPaise: paise,
+  sellingPricePaise: paise,
+  taxRatePercent: z.number().min(0).max(100),
+  priceIncludesTax: z.boolean(),
+  reorderThreshold: z.number().int().min(0).max(1_000_000),
+};
+
+const sellingNotAboveMrp = {
+  check: (v) =>
+    v.sellingPricePaise === undefined ||
+    v.mrpPaise === undefined ||
+    v.sellingPricePaise <= v.mrpPaise,
+  options: {
+    message: "Selling price cannot exceed MRP",
+    path: ["sellingPricePaise"],
+  },
+};
+
+export const variantCreateSchema = z
+  .object({
+    id: z.string().uuid().optional(),
+    sku: variantFields.sku,
+    barcode: variantFields.barcode,
+    size: variantFields.size,
+    costPaise: variantFields.costPaise,
+    mrpPaise: variantFields.mrpPaise,
+    sellingPricePaise: variantFields.sellingPricePaise,
+    taxRatePercent: variantFields.taxRatePercent.optional(),
+    priceIncludesTax: variantFields.priceIncludesTax.optional(),
+    reorderThreshold: variantFields.reorderThreshold.optional(),
+    openingStock: z.number().int().min(0).max(1_000_000).optional(),
+  })
+  .strict()
+  .refine(sellingNotAboveMrp.check, sellingNotAboveMrp.options);
+
+// Stock is NOT here: it can only change through stock adjustments.
+export const variantUpdateSchema = z
+  .object(variantFields)
+  .partial()
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "Nothing to update",
+  })
+  .refine(sellingNotAboveMrp.check, sellingNotAboveMrp.options);
+
+export const stockAdjustmentSchema = z
+  .object({
+    quantityChange: z
+      .number()
+      .int()
+      .min(-1_000_000)
+      .max(1_000_000)
+      .refine((n) => n !== 0, { message: "Quantity change must not be zero" }),
+    reason: z.string().trim().min(3, "Please give a reason").max(200),
+  })
+  .strict();
+
+export const barcodeParamSchema = variantFields.barcode;
+
+
+=== server\src\domain\saleSchemas.js ===
+import { z } from "zod";
+
+const paise = z.number().int().min(0).max(100_000_000);
+
+// A discount is { type: 'percent', value: 10 } or { type: 'amount', value: <paise> }.
+const discountSchema = z.discriminatedUnion("type", [
+  z
+    .object({ type: z.literal("percent"), value: z.number().gt(0).max(100) })
+    .strict(),
+  z
+    .object({
+      type: z.literal("amount"),
+      value: z.number().int().gt(0).max(100_000_000),
+    })
+    .strict(),
+]);
+
+const lineSchema = z
+  .object({
+    variantId: z.string().min(1).max(64),
+    quantity: z.number().int().min(1).max(9999),
+    unitPricePaise: paise,
+    discount: discountSchema.nullable().optional(),
+  })
+  .strict();
+
+const isDate = (text) => !Number.isNaN(Date.parse(text));
+
+// Note what is NOT accepted: totals, tax, product names, cost. The server works
+// those out itself. `claimedTotalPaise` is only compared with the server's total.
+export const saleCreateSchema = z
+  .object({
+    id: z.string().uuid(),
+    invoiceNumber: z
+      .string()
+      .regex(/^[A-Z0-9]{1,6}-\d{1,9}$/, "Use a format like INV-000123")
+      .optional(),
+    soldAt: z.string().refine(isDate, "Not a valid date and time").optional(),
+    offline: z.boolean().optional(),
+    lines: z.array(lineSchema).min(1).max(200),
+    billDiscount: discountSchema.nullable().optional(),
+    payment: z
+      .object({
+        method: z.enum(["cash", "upi", "card"]),
+        amountTenderedPaise: paise.optional(),
+        reference: z.string().trim().max(40).optional(),
+      })
+      .strict(),
+    claimedTotalPaise: paise.optional(),
+  })
+  .strict()
+  .refine(
+    (sale) =>
+      new Set(sale.lines.map((l) => l.variantId)).size === sale.lines.length,
+    {
+      message: "Each item may appear only once. Combine the quantities.",
+      path: ["lines"],
+    },
+  );
+
+
+=== server\src\domain\syncSchemas.js ===
+import { z } from "zod";
+
+const text = (max) => z.string().trim().min(1).max(max);
+const paise = z.number().int().min(0).max(100_000_000);
+const isDate = (value) => !Number.isNaN(Date.parse(value));
+
+// The outer shape of a batch. Each operation's `data` is checked separately, so one
+// bad operation is reported for itself and does not fail the whole batch.
+export const pushEnvelopeSchema = z
+  .object({
+    ops: z
+      .array(
+        z
+          .object({
+            type: z.string().min(1).max(40),
+            data: z.record(z.string(), z.unknown()),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(50),
+  })
+  .strict();
+
+export const productDataSchema = z
+  .object({
+    id: z.string().uuid(),
+    name: text(120),
+    category: text(60),
+    brand: z.string().trim().max(60),
+    supplier: z.string().trim().max(120),
+    status: z.enum(["active", "archived"]),
+  })
+  .strict();
+
+export const variantDataSchema = z
+  .object({
+    id: z.string().uuid(),
+    productId: z.string().uuid(),
+    sku: text(40),
+    barcode: z
+      .string()
+      .trim()
+      .min(4)
+      .max(48)
+      .regex(/^[A-Za-z0-9\-_.]+$/, "Barcode has invalid characters"),
+    size: text(20),
+    costPaise: paise,
+    mrpPaise: paise,
+    sellingPricePaise: paise,
+    taxRatePercent: z.number().min(0).max(100),
+    priceIncludesTax: z.boolean(),
+    reorderThreshold: z.number().int().min(0).max(1_000_000),
+    status: z.enum(["active", "archived"]),
+  })
+  .strict()
+  .refine((v) => v.sellingPricePaise <= v.mrpPaise, {
+    message: "Selling price cannot exceed MRP",
+    path: ["sellingPricePaise"],
+  });
+
+// Sale movements are NOT sent: the server creates them when it saves the sale.
+export const movementDataSchema = z
+  .object({
+    id: z.string().uuid(),
+    variantId: z.string().min(1).max(64),
+    type: z.enum(["opening", "adjustment", "purchase", "return"]),
+    quantityChange: z
+      .number()
+      .int()
+      .min(-1_000_000)
+      .max(1_000_000)
+      .refine((n) => n !== 0, { message: "Quantity change must not be zero" }),
+    reason: z.string().trim().max(200),
+    createdAt: z.string().refine(isDate, "Not a valid date and time"),
+  })
+  .strict();
+
+
+=== server\src\helpers\catalog.js ===
+import { randomUUID } from "node:crypto";
+import { Product } from "../../src/models/Product.js";
+import { Variant } from "../../src/models/Variant.js";
+
+// Creates records straight in the database (skipping the API), for test set-up.
+export function makeProduct(over = {}) {
+  return Product.create({ name: "Cotton Shirt", category: "Shirts", ...over });
+}
+
+export function makeVariant(productId, over = {}) {
+  const unique = randomUUID().replace(/-/g, "");
+  return Variant.create({
+    productId,
+    sku: `SKU-${unique.slice(0, 8)}`,
+    barcode: `BC${unique.slice(0, 10)}`,
+    size: "M",
+    costPaise: 30000,
+    mrpPaise: 99900,
+    sellingPricePaise: 79900,
+    taxRatePercent: 5,
+    priceIncludesTax: true,
+    reorderThreshold: 3,
+    currentStock: 10,
+    ...over,
+  });
+}
+
+// A valid request body for creating a variant through the API.
+export const variantBody = (over = {}) => ({
+  sku: "SHIRT-M",
+  barcode: "CLO000001",
+  size: "M",
+  costPaise: 30000,
+  mrpPaise: 99900,
+  sellingPricePaise: 79900,
+  taxRatePercent: 5,
+  openingStock: 10,
+  ...over,
+});
+
+
+=== server\src\http\asyncHandler.js ===
+// Lets a route use async/await: any error is passed on to the error handler.
+export const asyncHandler = (handler) => (req, res, next) =>
+  Promise.resolve(handler(req, res, next)).catch(next);
+
+
+=== server\src\models\AuditLog.js ===
+import { randomUUID } from "node:crypto";
+import mongoose from "mongoose";
+
+const auditSchema = new mongoose.Schema({
+  _id: { type: String, default: () => randomUUID() },
+  at: { type: Date, default: Date.now, index: true },
+  userId: { type: String, default: null },
+  username: { type: String, default: null },
+  action: { type: String, required: true, index: true },
+  entity: { type: String, default: "" },
+  entityId: { type: String, default: "" },
+  details: { type: mongoose.Schema.Types.Mixed, default: {} },
+  ip: { type: String, default: null },
+  requestId: { type: String, default: null },
+});
+
+export const AuditLog =
+  mongoose.models.AuditLog ?? mongoose.model("AuditLog", auditSchema);
+
+
+=== server\src\models\Counter.js ===
+import mongoose from "mongoose";
+
+const counterSchema = new mongoose.Schema({
+  _id: { type: String },
+  seq: { type: Number, default: 0 },
+});
+
+export const Counter =
+  mongoose.models.Counter ?? mongoose.model("Counter", counterSchema);
+
+// The next number in a named series. Call it inside a transaction: if the
+// transaction fails, the number is not used up.
+export async function nextSequence(name, session) {
+  const counter = await Counter.findOneAndUpdate(
+    { _id: name },
+    { $inc: { seq: 1 } },
+    { new: true, upsert: true, session },
+  );
+  return counter.seq;
+}
+
+
+=== server\src\models\index.js ===
+import mongoose from "mongoose";
+import "./User.js";
+import "./AuditLog.js";
+import "./Settings.js";
+import "./Product.js";
+import "./Variant.js";
+import "./StockMovement.js";
+import "./Counter.js";
+import "./Sale.js";
+
+// Builds every unique index up front, so duplicates are refused from the first request.
+export async function initModels() {
+  await Promise.all(
+    Object.values(mongoose.models).map((model) => model.init()),
+  );
+}
+
+
+=== server\src\models\Product.js ===
+import { randomUUID } from "node:crypto";
+import mongoose from "mongoose";
+
+const productSchema = new mongoose.Schema(
+  {
+    _id: { type: String, default: () => randomUUID() },
+    name: { type: String, required: true, trim: true, maxlength: 120 },
+    category: { type: String, required: true, trim: true, maxlength: 60 },
+    brand: { type: String, default: "", trim: true, maxlength: 60 },
+    supplier: { type: String, default: "", trim: true, maxlength: 120 },
+    status: {
+      type: String,
+      enum: ["active", "archived"],
+      default: "active",
+      index: true,
+    },
+  },
+  { timestamps: true },
+);
+productSchema.index({ name: 1 });
+
+export const Product =
+  mongoose.models.Product ?? mongoose.model("Product", productSchema);
+
+export function publicProduct(product) {
+  return {
+    id: product._id,
+    name: product.name,
+    category: product.category,
+    brand: product.brand,
+    supplier: product.supplier,
+    status: product.status,
+    createdAt: product.createdAt,
+    updatedAt: product.updatedAt,
+  };
+}
+
+
+=== server\src\models\Sale.js ===
+import mongoose from "mongoose";
+
+const { Schema } = mongoose;
+
+const wholeNumber = {
+  validator: Number.isInteger,
+  message: "{PATH} must be a whole number",
+};
+const int = (extra = {}) => ({
+  type: Number,
+  required: true,
+  validate: wholeNumber,
+  ...extra,
+});
+
+const discountSchema = new Schema(
+  {
+    type: { type: String, enum: ["percent", "amount"], required: true },
+    value: { type: Number, required: true },
+  },
+  { _id: false },
+);
+
+// A snapshot of one line as it was sold. Later catalogue changes never touch it.
+const itemSchema = new Schema(
+  {
+    lineNumber: int({ min: 1 }),
+    variantId: { type: String, required: true },
+    productId: { type: String, required: true },
+    productName: { type: String, default: "" },
+    sku: { type: String, required: true },
+    barcode: { type: String, required: true },
+    size: { type: String, required: true },
+    quantity: int({ min: 1 }),
+    unitPricePaise: int({ min: 0 }),
+    mrpPaise: int({ min: 0 }),
+    costPaise: int({ min: 0 }),
+    taxRatePercent: { type: Number, required: true },
+    priceIncludesTax: { type: Boolean, required: true },
+    discount: { type: discountSchema, default: null },
+    grossPaise: int(),
+    lineDiscountPaise: int(),
+    billDiscountSharePaise: int(),
+    taxableValuePaise: int(),
+    taxPaise: int(),
+    lineTotalPaise: int(),
+  },
+  { _id: false },
+);
+
+const flagSchema = new Schema(
+  {
+    code: { type: String, required: true },
+    message: { type: String, default: "" },
+    variantId: { type: String, default: null },
+  },
+  { _id: false },
+);
+
+const saleSchema = new Schema(
+  {
+    _id: { type: String, required: true }, // the id made by the device: also the idempotency key
+    invoiceNumber: { type: String, required: true, unique: true },
+    status: { type: String, enum: ["completed"], default: "completed" },
+    source: { type: String, enum: ["online", "offline-sync"], required: true },
+    soldAt: { type: Date, required: true },
+    cashierId: { type: String, required: true },
+    cashierName: { type: String, default: "" },
+
+    shop: {
+      name: { type: String, default: "" },
+      address: { type: String, default: "" },
+      phone: { type: String, default: "" },
+      taxId: { type: String, default: "" },
+      footer: { type: String, default: "" },
+    },
+
+    itemCount: int({ min: 1 }),
+    subtotalPaise: int(),
+    itemDiscountPaise: int(),
+    billDiscountPaise: int(),
+    discountPaise: int(),
+    billDiscount: { type: discountSchema, default: null },
+    taxableValuePaise: int(),
+    taxPaise: int(),
+    taxIncludedPaise: int(),
+    taxAddedPaise: int(),
+    exactTotalPaise: int(),
+    roundOffPaise: int(),
+    totalPaise: int({ min: 0 }),
+
+    payment: {
+      method: { type: String, enum: ["cash", "upi", "card"], required: true },
+      amountTenderedPaise: int({ min: 0 }),
+      changePaise: int({ min: 0 }),
+      reference: { type: String, default: "" },
+    },
+
+    items: { type: [itemSchema], default: [] },
+    flags: { type: [flagSchema], default: [] },
+    flagged: { type: Boolean, default: false, index: true },
+
+    requestHash: { type: String, required: true },
+  },
+  { timestamps: true }, // createdAt = when the server received it
+);
+saleSchema.index({ soldAt: -1 });
+saleSchema.index({ cashierId: 1, soldAt: -1 });
+
+export const Sale = mongoose.models.Sale ?? mongoose.model("Sale", saleSchema);
+
+// What a client is allowed to see. Cost prices are for admins only.
+export function publicSale(
+  sale,
+  { includeCost = false, includeItems = true } = {},
+) {
+  const out = {
+    id: sale._id,
+    invoiceNumber: sale.invoiceNumber,
+    status: sale.status,
+    source: sale.source,
+    soldAt: sale.soldAt,
+    createdAt: sale.createdAt,
+    cashierId: sale.cashierId,
+    cashierName: sale.cashierName,
+    shop: {
+      name: sale.shop?.name ?? "",
+      address: sale.shop?.address ?? "",
+      phone: sale.shop?.phone ?? "",
+      taxId: sale.shop?.taxId ?? "",
+      footer: sale.shop?.footer ?? "",
+    },
+    itemCount: sale.itemCount,
+    subtotalPaise: sale.subtotalPaise,
+    itemDiscountPaise: sale.itemDiscountPaise,
+    billDiscountPaise: sale.billDiscountPaise,
+    discountPaise: sale.discountPaise,
+    billDiscount: sale.billDiscount
+      ? { type: sale.billDiscount.type, value: sale.billDiscount.value }
+      : null,
+    taxableValuePaise: sale.taxableValuePaise,
+    taxPaise: sale.taxPaise,
+    taxIncludedPaise: sale.taxIncludedPaise,
+    taxAddedPaise: sale.taxAddedPaise,
+    exactTotalPaise: sale.exactTotalPaise,
+    roundOffPaise: sale.roundOffPaise,
+    totalPaise: sale.totalPaise,
+    payment: {
+      method: sale.payment.method,
+      amountTenderedPaise: sale.payment.amountTenderedPaise,
+      changePaise: sale.payment.changePaise,
+      reference: sale.payment.reference,
+    },
+    flagged: sale.flagged,
+    flags: sale.flags.map((flag) => ({
+      code: flag.code,
+      message: flag.message,
+      variantId: flag.variantId,
+    })),
+  };
+
+  if (includeItems) {
+    out.items = sale.items.map((item) => {
+      const view = {
+        lineNumber: item.lineNumber,
+        variantId: item.variantId,
+        productId: item.productId,
+        productName: item.productName,
+        sku: item.sku,
+        barcode: item.barcode,
+        size: item.size,
+        quantity: item.quantity,
+        unitPricePaise: item.unitPricePaise,
+        mrpPaise: item.mrpPaise,
+        taxRatePercent: item.taxRatePercent,
+        priceIncludesTax: item.priceIncludesTax,
+        discount: item.discount
+          ? { type: item.discount.type, value: item.discount.value }
+          : null,
+        grossPaise: item.grossPaise,
+        lineDiscountPaise: item.lineDiscountPaise,
+        billDiscountSharePaise: item.billDiscountSharePaise,
+        taxableValuePaise: item.taxableValuePaise,
+        taxPaise: item.taxPaise,
+        lineTotalPaise: item.lineTotalPaise,
+      };
+      if (includeCost) view.costPaise = item.costPaise;
+      return view;
+    });
+  }
+  return out;
+}
+
+
+=== server\src\models\Settings.js ===
+import mongoose from "mongoose";
+
+// One document for the whole shop, with the fixed id "shop".
+const settingsSchema = new mongoose.Schema(
+  {
+    _id: { type: String, default: "shop" },
+    shopName: {
+      type: String,
+      default: "My Clothing Store",
+      trim: true,
+      maxlength: 80,
+    },
+    address: { type: String, default: "", trim: true, maxlength: 200 },
+    phone: { type: String, default: "", trim: true, maxlength: 20 },
+    taxId: { type: String, default: "", trim: true, maxlength: 20 },
+    invoicePrefix: { type: String, default: "INV", match: /^[A-Z0-9]{1,6}$/ },
+    receiptFooter: { type: String, default: "", trim: true, maxlength: 120 },
+    receiptPaperWidth: { type: String, enum: ["58", "80"], default: "58" },
+    allowNegativeStock: { type: Boolean, default: false },
+    roundToRupee: { type: Boolean, default: true },
+    // Used for sales from cashiers (Phase 9c).
+    maxCashierDiscountPercent: { type: Number, default: 10, min: 0, max: 100 },
+  },
+  { timestamps: true },
+);
+
+export const Settings =
+  mongoose.models.Settings ?? mongoose.model("Settings", settingsSchema);
+
+export async function getShopSettings() {
+  const existing = await Settings.findById("shop");
+  if (existing) return existing;
+  try {
+    return await Settings.create({ _id: "shop" });
+  } catch (err) {
+    if (err?.code === 11000) return Settings.findById("shop"); // created at the same moment
+    throw err;
+  }
+}
+
+const PUBLIC_FIELDS = [
+  "shopName",
+  "address",
+  "phone",
+  "taxId",
+  "invoicePrefix",
+  "receiptFooter",
+  "receiptPaperWidth",
+  "allowNegativeStock",
+  "roundToRupee",
+  "maxCashierDiscountPercent",
+];
+
+export function publicSettings(doc) {
+  return Object.fromEntries(PUBLIC_FIELDS.map((field) => [field, doc[field]]));
+}
+
+
+=== server\src\models\StockMovement.js ===
+import { randomUUID } from "node:crypto";
+import mongoose from "mongoose";
+
+export const MOVEMENT_TYPES = [
+  "opening",
+  "sale",
+  "purchase",
+  "return",
+  "adjustment",
+];
+
+// An append-only record of every change to a variant's stock.
+const movementSchema = new mongoose.Schema(
+  {
+    _id: { type: String, default: () => randomUUID() },
+    variantId: { type: String, required: true, index: true },
+    type: { type: String, enum: MOVEMENT_TYPES, required: true },
+    quantityChange: {
+      type: Number,
+      required: true,
+      validate: Number.isInteger,
+    },
+    stockAfter: { type: Number, required: true, validate: Number.isInteger },
+    reason: { type: String, default: "", trim: true, maxlength: 200 },
+    referenceId: { type: String, default: null, index: true },
+    userId: { type: String, default: null },
+    // When it really happened. For a change synced from a device this is the device's
+    // time. createdAt is always the time the server recorded it.
+    occurredAt: { type: Date, default: Date.now },
+  },
+  { timestamps: { createdAt: true, updatedAt: false } },
+);
+movementSchema.index({ variantId: 1, createdAt: -1 });
+
+export const StockMovement =
+  mongoose.models.StockMovement ??
+  mongoose.model("StockMovement", movementSchema);
+
+export function publicMovement(movement) {
+  return {
+    id: movement._id,
+    variantId: movement.variantId,
+    type: movement.type,
+    quantityChange: movement.quantityChange,
+    stockAfter: movement.stockAfter,
+    reason: movement.reason,
+    referenceId: movement.referenceId,
+    userId: movement.userId,
+    occurredAt: movement.occurredAt,
+    createdAt: movement.createdAt,
+  };
+}
+
+
+=== server\src\models\User.js ===
+import { randomUUID } from "node:crypto";
+import mongoose from "mongoose";
+
+const userSchema = new mongoose.Schema(
+  {
+    _id: { type: String, default: () => randomUUID() },
+    username: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+      lowercase: true,
+      minlength: 3,
+      maxlength: 30,
+      match: /^[a-z0-9._-]+$/,
+    },
+    displayName: { type: String, required: true, trim: true, maxlength: 60 },
+    // Never returned by default. Login asks for it explicitly with .select('+passwordHash').
+    passwordHash: { type: String, required: true, select: false },
+    role: { type: String, enum: ["admin", "cashier"], required: true },
+    active: { type: Boolean, default: true },
+    tokenVersion: { type: Number, default: 0 },
+    failedLogins: { type: Number, default: 0 },
+    lockedUntil: { type: Date, default: null },
+    lastLoginAt: { type: Date, default: null },
+  },
+  { timestamps: true },
+);
+
+export const User = mongoose.models.User ?? mongoose.model("User", userSchema);
+
+// The only shape of a user that is ever sent to a client.
+export function publicUser(user) {
+  return {
+    id: user._id,
+    username: user.username,
+    displayName: user.displayName,
+    role: user.role,
+    active: user.active,
+    lastLoginAt: user.lastLoginAt,
+    createdAt: user.createdAt,
+  };
+}
+
+
+=== server\src\models\Variant.js ===
+import { randomUUID } from "node:crypto";
+import mongoose from "mongoose";
+
+const wholeNumber = {
+  validator: Number.isInteger,
+  message: "{PATH} must be a whole number",
+};
+const paise = { type: Number, required: true, min: 0, validate: wholeNumber };
+
+// One sellable item: a product in one size. Money is whole paise.
+const variantSchema = new mongoose.Schema(
+  {
+    _id: { type: String, default: () => randomUUID() },
+    productId: { type: String, required: true, index: true },
+    sku: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+      maxlength: 40,
+    },
+    barcode: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+      maxlength: 48,
+    },
+    size: { type: String, required: true, trim: true, maxlength: 20 },
+    costPaise: paise,
+    mrpPaise: paise,
+    sellingPricePaise: paise,
+    taxRatePercent: { type: Number, default: 0, min: 0, max: 100 },
+    priceIncludesTax: { type: Boolean, default: true },
+    reorderThreshold: {
+      type: Number,
+      default: 0,
+      min: 0,
+      validate: wholeNumber,
+    },
+    // Changed only by services/stock.js. It can go negative only when the shop allows it.
+    currentStock: { type: Number, default: 0, validate: wholeNumber },
+    status: {
+      type: String,
+      enum: ["active", "archived"],
+      default: "active",
+      index: true,
+    },
+  },
+  { timestamps: true },
+);
+variantSchema.index({ productId: 1, size: 1 }, { unique: true });
+
+export const Variant =
+  mongoose.models.Variant ?? mongoose.model("Variant", variantSchema);
+
+// Cost price is what the shop paid. Only admins may see it.
+export function publicVariant(variant, { includeCost = false } = {}) {
+  const out = {
+    id: variant._id,
+    productId: variant.productId,
+    sku: variant.sku,
+    barcode: variant.barcode,
+    size: variant.size,
+    mrpPaise: variant.mrpPaise,
+    sellingPricePaise: variant.sellingPricePaise,
+    taxRatePercent: variant.taxRatePercent,
+    priceIncludesTax: variant.priceIncludesTax,
+    reorderThreshold: variant.reorderThreshold,
+    currentStock: variant.currentStock,
+    status: variant.status,
+    createdAt: variant.createdAt,
+    updatedAt: variant.updatedAt,
+  };
+  if (includeCost) out.costPaise = variant.costPaise;
+  return out;
+}
+
+
+

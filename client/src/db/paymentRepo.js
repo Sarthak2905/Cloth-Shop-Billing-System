@@ -27,6 +27,9 @@ export async function recordPayments({ saleId, payments }) {
       shortPaise: result.shortPaise,
       paymentRecordedAt:
         result.status === 'paid' ? new Date().toISOString() : null,
+      // a new version of the payment, still to be sent to the server
+      paymentRev: (sale.paymentRev ?? 0) + 1,
+      paymentPending: 1,
     }
     await db.sales.update(saleId, changes)
     return { ...sale, ...changes }

@@ -75,6 +75,13 @@ async function doSync({ api, batchSize = BATCH_SIZE }) {
   return summary
 }
 
+// True when the payment on the device is still the one that was sent. If it was changed
+// while the operation was on its way, it stays waiting and is sent again.
+async function paymentIsCurrent(saleId, sentRev) {
+  const current = await db.sales.get(saleId)
+  return (current?.paymentRev ?? 0) === (sentRev ?? 0)
+}
+
 // Records what the server said about each operation. Returns true if any of them
 // hit a temporary error (those are tried again later).
 async function applyBatchResults(batch, results, summary) {
@@ -87,12 +94,23 @@ async function applyBatchResults(batch, results, summary) {
     if (result?.status === 'applied' || result?.status === 'duplicate') {
       summary[result.status] += 1
       if (op.kind === 'sale') {
-        await db.sales.update(op.entityId, {
+        const changes = {
           syncStatus: 'synced',
           syncedAt: new Date().toISOString(),
           syncFlags: result.flags ?? [],
           syncMessage: '',
-        })
+        }
+        // the bill carried its payment: nothing more to send, unless it changed meanwhile
+        if (await paymentIsCurrent(op.entityId, op.paymentRev)) {
+          changes.paymentPending = undefined
+        }
+        await db.sales.update(op.entityId, changes)
+      } else if (op.kind === 'salepay') {
+        if (await paymentIsCurrent(op.entityId, op.paymentRev)) {
+          await db.sales.update(op.entityId, { paymentPending: undefined })
+        }
+      } else if (op.kind === 'salecancel') {
+        await db.sales.update(op.entityId, { cancelPending: undefined })
       }
       await clearAttention(op)
     } else if (result?.status === 'rejected') {
@@ -103,6 +121,10 @@ async function applyBatchResults(batch, results, summary) {
           syncStatus: 'review',
           syncMessage: result.message ?? '',
         })
+      } else if (op.kind === 'salepay') {
+        await db.sales.update(op.entityId, { paymentPending: undefined })
+      } else if (op.kind === 'salecancel') {
+        await db.sales.update(op.entityId, { cancelPending: undefined })
       }
     } else {
       summary.error += 1

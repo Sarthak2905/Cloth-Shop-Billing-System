@@ -1,5 +1,8 @@
 // All amounts are integer paise. Percentages and tax rates are converted to
 // basis points (1% = 100 bp) so no floating-point money is ever used.
+// Meter items: the quantity is a whole number of CENTIMETRES and the price is per meter.
+
+export const CM_PER_METER = 100
 
 // Integer division rounded half-up. Only for non-negative numbers.
 export function divRound(numerator, denominator) {
@@ -7,6 +10,13 @@ export function divRound(numerator, denominator) {
 }
 
 const toBasisPoints = (percent) => Math.round(percent * 100)
+
+// The amount of one line before discounts: price x quantity, or for meter items
+// price per meter x centimetres / 100, rounded to the nearest paisa.
+export function lineGrossPaise(line) {
+  const raw = line.unitPricePaise * line.quantity
+  return line.unit === 'meter' ? divRound(raw, CM_PER_METER) : raw
+}
 
 // Splits `totalPaise` across `weights` in proportion, with no paisa lost:
 // every share is rounded down, then the leftover paise go to the largest
@@ -42,23 +52,34 @@ export function discountAmount(discount, basePaise) {
   return Math.min(discount.value, basePaise)
 }
 
+// A line can take a BILL discount unless its product does not allow discounts, or
+// the cashier switched discounts off for it on this bill.
+export function isDiscountEligible(line) {
+  return line.discountAllowed !== false && line.discountExcluded !== true
+}
+
 export function calculateTotals(cart, { roundToRupee = true } = {}) {
   const base = cart.lines.map((line) => {
-    const grossPaise = line.unitPricePaise * line.quantity
+    const grossPaise = lineGrossPaise(line)
     const lineDiscountPaise = discountAmount(line.discount, grossPaise)
     return {
       line,
       grossPaise,
       lineDiscountPaise,
       afterItemPaise: grossPaise - lineDiscountPaise,
+      eligible: isDiscountEligible(line),
     }
   })
 
-  const afterItemTotal = base.reduce((sum, b) => sum + b.afterItemPaise, 0)
-  const billDiscountPaise = discountAmount(cart.billDiscount, afterItemTotal)
+  // The bill discount is worked out on the eligible items only, and shared among them.
+  const eligibleBasePaise = base.reduce(
+    (sum, b) => (b.eligible ? sum + b.afterItemPaise : sum),
+    0,
+  )
+  const billDiscountPaise = discountAmount(cart.billDiscount, eligibleBasePaise)
   const shares = allocateProportionally(
     billDiscountPaise,
-    base.map((b) => b.afterItemPaise),
+    base.map((b) => (b.eligible ? b.afterItemPaise : 0)),
   )
 
   const lines = base.map((b, i) => {
@@ -81,11 +102,13 @@ export function calculateTotals(cart, { roundToRupee = true } = {}) {
 
     return {
       variantId: b.line.variantId,
+      unit: b.line.unit ?? 'piece',
       quantity: b.line.quantity,
       unitPricePaise: b.line.unitPricePaise,
       grossPaise: b.grossPaise,
       lineDiscountPaise: b.lineDiscountPaise,
       billDiscountSharePaise: shares[i],
+      discountEligible: b.eligible,
       netPaise,
       taxableValuePaise,
       taxPaise,
@@ -106,9 +129,14 @@ export function calculateTotals(cart, { roundToRupee = true } = {}) {
 
   return {
     lines,
-    itemCount: lines.reduce((total, l) => total + l.quantity, 0),
+    // Pieces count one each; a meter line (a length of fabric) counts as one item.
+    itemCount: lines.reduce(
+      (total, l) => total + (l.unit === 'meter' ? 1 : l.quantity),
+      0,
+    ),
     subtotalPaise: sum('grossPaise'),
     itemDiscountPaise: sum('lineDiscountPaise'),
+    eligibleBasePaise,
     billDiscountPaise,
     discountPaise: sum('lineDiscountPaise') + billDiscountPaise,
     taxableValuePaise: sum('taxableValuePaise'),

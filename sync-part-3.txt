@@ -1,0 +1,880 @@
+﻿=== server\src\routes\auth.js ===
+import { randomUUID } from "node:crypto";
+import { Router } from "express";
+import { z } from "zod";
+import { AppError, unauthorized } from "../errors.js";
+import { requireAuth } from "../auth/middleware.js";
+import { passwordSchema } from "../auth/passwordPolicy.js";
+import { hashPassword, verifyPassword } from "../auth/passwords.js";
+import { signToken } from "../auth/tokens.js";
+import { asyncHandler } from "../http/asyncHandler.js";
+import { createLimiter } from "../http/rateLimiter.js";
+import { parse } from "../http/validate.js";
+import { User, publicUser } from "../models/User.js";
+import { audit } from "../services/audit.js";
+
+const loginSchema = z
+  .object({
+    username: z.string().trim().min(1).max(60),
+    password: z.string().min(1).max(200),
+  })
+  .strict();
+
+const changePasswordSchema = z
+  .object({
+    currentPassword: z.string().min(1).max(200),
+    newPassword: passwordSchema,
+  })
+  .strict();
+
+export function authRouter(config) {
+  const router = Router();
+  const loginLimiter = createLimiter(
+    config.loginRateLimit,
+    "Too many login attempts. Please try again later.",
+  );
+  const authenticate = requireAuth(config);
+  let dummyHash = null;
+
+  // Spends the same time a real password check would, so the response time does
+  // not reveal whether a username exists.
+  async function burnTime(password) {
+    dummyHash ??= await hashPassword(randomUUID(), config.bcryptCost);
+    await verifyPassword(password, dummyHash);
+  }
+
+  router.post(
+    "/login",
+    loginLimiter,
+    asyncHandler(async (req, res) => {
+      const { username, password } = parse(loginSchema, req.body);
+      const name = username.toLowerCase();
+      const user = await User.findOne({ username: name }).select(
+        "+passwordHash",
+      );
+      const now = new Date();
+
+      const reject = async (reason) => {
+        await audit(req, {
+          actor: null,
+          action: "login.failed",
+          entity: "user",
+          entityId: user?._id ?? "",
+          details: { username: name, reason },
+        });
+        throw unauthorized("Invalid username or password");
+      };
+
+      if (!user || !user.active) {
+        await burnTime(password);
+        return reject(user ? "account disabled" : "unknown user");
+      }
+
+      if (user.lockedUntil && user.lockedUntil > now) {
+        const minutes = Math.max(
+          1,
+          Math.ceil((user.lockedUntil - now) / 60000),
+        );
+        throw new AppError(
+          429,
+          "ACCOUNT_LOCKED",
+          `Too many failed attempts. Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`,
+        );
+      }
+
+      if (!(await verifyPassword(password, user.passwordHash))) {
+        user.failedLogins += 1;
+        if (user.failedLogins >= config.lockout.maxFailures) {
+          user.lockedUntil = new Date(
+            now.getTime() + config.lockout.minutes * 60000,
+          );
+          user.failedLogins = 0;
+          await audit(req, {
+            actor: user,
+            action: "account.locked",
+            entity: "user",
+            entityId: user._id,
+          });
+        }
+        await user.save();
+        return reject("wrong password");
+      }
+
+      user.failedLogins = 0;
+      user.lockedUntil = null;
+      user.lastLoginAt = now;
+      await user.save();
+
+      await audit(req, {
+        actor: user,
+        action: "login.succeeded",
+        entity: "user",
+        entityId: user._id,
+      });
+      res.json({ token: signToken(user, config), user: publicUser(user) });
+    }),
+  );
+
+  router.get("/me", authenticate, (req, res) => {
+    res.json({ user: publicUser(req.user) });
+  });
+
+  router.post(
+    "/change-password",
+    authenticate,
+    asyncHandler(async (req, res) => {
+      const { currentPassword, newPassword } = parse(
+        changePasswordSchema,
+        req.body,
+      );
+      const user = await User.findById(req.user._id).select("+passwordHash");
+
+      if (!(await verifyPassword(currentPassword, user.passwordHash))) {
+        throw new AppError(
+          400,
+          "WRONG_PASSWORD",
+          "Your current password is not correct",
+        );
+      }
+      if (newPassword === currentPassword) {
+        throw new AppError(
+          400,
+          "VALIDATION_ERROR",
+          "The new password must be different",
+          [{ field: "newPassword", message: "Choose a different password" }],
+        );
+      }
+
+      user.passwordHash = await hashPassword(newPassword, config.bcryptCost);
+      user.tokenVersion += 1; // logs out every other session
+      await user.save();
+
+      await audit(req, {
+        action: "password.changed",
+        entity: "user",
+        entityId: user._id,
+      });
+      res.json({ token: signToken(user, config), user: publicUser(user) });
+    }),
+  );
+
+  return router;
+}
+
+
+=== server\src\routes\health.js ===
+import { Router } from "express";
+import mongoose from "mongoose";
+
+export function healthRouter() {
+  const router = Router();
+  router.get("/", (req, res) => {
+    res.json({
+      status: "ok",
+      database:
+        mongoose.connection.readyState === 1 ? "connected" : "disconnected",
+      time: new Date().toISOString(),
+    });
+  });
+  return router;
+}
+
+
+=== server\src\routes\products.js ===
+import { Router } from "express";
+import { z } from "zod";
+import { requireAuth, requireRole } from "../auth/middleware.js";
+import { runInTransaction } from "../db/transaction.js";
+import {
+  productCreateSchema,
+  productUpdateSchema,
+  variantCreateSchema,
+} from "../domain/catalogSchemas.js";
+import { conflict, notFound } from "../errors.js";
+import { asyncHandler } from "../http/asyncHandler.js";
+import { translateDuplicate } from "../http/duplicates.js";
+import { pageInfo, paginationFields } from "../http/pagination.js";
+import { parse } from "../http/validate.js";
+import { escapeRegex } from "../lib/text.js";
+import { Product, publicProduct } from "../models/Product.js";
+import { StockMovement } from "../models/StockMovement.js";
+import { Variant, publicVariant } from "../models/Variant.js";
+import { audit } from "../services/audit.js";
+
+const listSchema = z.object({
+  search: z.string().trim().max(60).optional(),
+  status: z.enum(["active", "archived", "all"]).default("active"),
+  ...paginationFields,
+});
+
+const NATURAL_ORDER = { locale: "en", numericOrdering: true };
+
+export function productsRouter(config) {
+  const router = Router();
+  router.use(requireAuth(config));
+  const adminOnly = requireRole("admin");
+  const view = (req) => ({ includeCost: req.user.role === "admin" });
+
+  router.get(
+    "/",
+    asyncHandler(async (req, res) => {
+      const query = parse(listSchema, req.query);
+      const { skip } = pageInfo(query);
+
+      const filter = {};
+      if (query.status !== "all") filter.status = query.status;
+      if (query.search) {
+        const pattern = new RegExp(escapeRegex(query.search), "i");
+        filter.$or = [
+          { name: pattern },
+          { brand: pattern },
+          { category: pattern },
+        ];
+      }
+
+      const [items, total] = await Promise.all([
+        Product.find(filter)
+          .collation({ locale: "en", strength: 2 })
+          .sort({ name: 1 })
+          .skip(skip)
+          .limit(query.limit),
+        Product.countDocuments(filter),
+      ]);
+      res.json({
+        items: items.map(publicProduct),
+        page: query.page,
+        limit: query.limit,
+        total,
+      });
+    }),
+  );
+
+  router.post(
+    "/",
+    adminOnly,
+    asyncHandler(async (req, res) => {
+      const data = parse(productCreateSchema, req.body);
+      let product;
+      try {
+        product = await Product.create({
+          ...(data.id ? { _id: data.id } : {}),
+          name: data.name,
+          category: data.category,
+          brand: data.brand ?? "",
+          supplier: data.supplier ?? "",
+        });
+      } catch (err) {
+        throw translateDuplicate(err);
+      }
+
+      await audit(req, {
+        action: "product.created",
+        entity: "product",
+        entityId: product._id,
+        details: { name: product.name },
+      });
+      res.status(201).json({ product: publicProduct(product) });
+    }),
+  );
+
+  router.get(
+    "/:id",
+    asyncHandler(async (req, res) => {
+      const product = await Product.findById(req.params.id);
+      if (!product) throw notFound("Product not found");
+
+      const variants = await Variant.find({ productId: product._id })
+        .collation(NATURAL_ORDER)
+        .sort({ size: 1 });
+      res.json({
+        product: publicProduct(product),
+        variants: variants.map((v) => publicVariant(v, view(req))),
+      });
+    }),
+  );
+
+  router.patch(
+    "/:id",
+    adminOnly,
+    asyncHandler(async (req, res) => {
+      const changes = parse(productUpdateSchema, req.body);
+      const product = await Product.findById(req.params.id);
+      if (!product) throw notFound("Product not found");
+
+      const changed = {};
+      for (const [field, value] of Object.entries(changes)) {
+        if (product[field] !== value) {
+          changed[field] = { from: product[field], to: value };
+          product[field] = value;
+        }
+      }
+      if (Object.keys(changed).length > 0) {
+        await product.save();
+        await audit(req, {
+          action: "product.updated",
+          entity: "product",
+          entityId: product._id,
+          details: { changes: changed },
+        });
+      }
+      res.json({ product: publicProduct(product) });
+    }),
+  );
+
+  // Archiving a product archives all of its variants too, in one transaction.
+  router.post(
+    "/:id/archive",
+    adminOnly,
+    asyncHandler(async (req, res) => {
+      const product = await runInTransaction(async (session) => {
+        const found = await Product.findById(req.params.id).session(session);
+        if (!found) throw notFound("Product not found");
+        found.status = "archived";
+        await found.save({ session });
+        await Variant.updateMany(
+          { productId: found._id },
+          { status: "archived" },
+          { session },
+        );
+        return found;
+      });
+
+      await audit(req, {
+        action: "product.archived",
+        entity: "product",
+        entityId: product._id,
+        details: { name: product.name },
+      });
+      res.json({ product: publicProduct(product) });
+    }),
+  );
+
+  router.post(
+    "/:productId/variants",
+    adminOnly,
+    asyncHandler(async (req, res) => {
+      const data = parse(variantCreateSchema, req.body);
+
+      let variant;
+      try {
+        variant = await runInTransaction(async (session) => {
+          const product = await Product.findById(req.params.productId).session(
+            session,
+          );
+          if (!product) throw notFound("Product not found");
+          if (product.status !== "active") {
+            throw conflict("PRODUCT_ARCHIVED", "This product is archived");
+          }
+
+          const openingStock = data.openingStock ?? 0;
+          const [created] = await Variant.create(
+            [
+              {
+                ...(data.id ? { _id: data.id } : {}),
+                productId: product._id,
+                sku: data.sku,
+                barcode: data.barcode,
+                size: data.size,
+                costPaise: data.costPaise,
+                mrpPaise: data.mrpPaise,
+                sellingPricePaise: data.sellingPricePaise,
+                taxRatePercent: data.taxRatePercent ?? 0,
+                priceIncludesTax: data.priceIncludesTax ?? true,
+                reorderThreshold: data.reorderThreshold ?? 0,
+                currentStock: openingStock,
+              },
+            ],
+            { session },
+          );
+
+          if (openingStock > 0) {
+            await StockMovement.create(
+              [
+                {
+                  variantId: created._id,
+                  type: "opening",
+                  quantityChange: openingStock,
+                  stockAfter: openingStock,
+                  reason: "Opening stock",
+                  userId: req.user._id,
+                },
+              ],
+              { session },
+            );
+          }
+          return created;
+        });
+      } catch (err) {
+        throw translateDuplicate(err, data);
+      }
+
+      await audit(req, {
+        action: "variant.created",
+        entity: "variant",
+        entityId: variant._id,
+        details: {
+          sku: variant.sku,
+          barcode: variant.barcode,
+          openingStock: variant.currentStock,
+        },
+      });
+      res
+        .status(201)
+        .json({ variant: publicVariant(variant, { includeCost: true }) });
+    }),
+  );
+
+  return router;
+}
+
+
+=== server\src\routes\sales.js ===
+import { Router } from "express";
+import { z } from "zod";
+import { requireAuth } from "../auth/middleware.js";
+import { saleCreateSchema } from "../domain/saleSchemas.js";
+import { notFound } from "../errors.js";
+import { asyncHandler } from "../http/asyncHandler.js";
+import { pageInfo, paginationFields } from "../http/pagination.js";
+import { parse } from "../http/validate.js";
+import { escapeRegex } from "../lib/text.js";
+import { Sale, publicSale } from "../models/Sale.js";
+import { audit } from "../services/audit.js";
+import { createSale } from "../services/sales.js";
+
+const isDate = (text) => !Number.isNaN(Date.parse(text));
+
+const listSchema = z.object({
+  search: z.string().trim().max(30).optional(),
+  from: z.string().refine(isDate, "Not a valid date").optional(),
+  to: z.string().refine(isDate, "Not a valid date").optional(),
+  flagged: z.enum(["true", "false"]).optional(),
+  cashierId: z.string().min(1).max(64).optional(),
+  ...paginationFields,
+});
+
+export function salesRouter(config) {
+  const router = Router();
+  router.use(requireAuth(config));
+
+  const isAdmin = (req) => req.user.role === "admin";
+  // Cashiers only ever see their own sales.
+  const ownOnly = (req) => (isAdmin(req) ? {} : { cashierId: req.user._id });
+  const view = (req) => ({ includeCost: isAdmin(req) });
+
+  router.post(
+    "/",
+    asyncHandler(async (req, res) => {
+      const data = parse(saleCreateSchema, req.body);
+      const { sale, duplicate } = await createSale({ data, user: req.user });
+
+      if (!duplicate) {
+        await audit(req, {
+          action: "sale.created",
+          entity: "sale",
+          entityId: sale._id,
+          details: {
+            invoiceNumber: sale.invoiceNumber,
+            totalPaise: sale.totalPaise,
+            source: sale.source,
+            flags: sale.flags.map((flag) => flag.code),
+          },
+        });
+      }
+      res
+        .status(duplicate ? 200 : 201)
+        .json({ sale: publicSale(sale, view(req)), duplicate });
+    }),
+  );
+
+  router.get(
+    "/",
+    asyncHandler(async (req, res) => {
+      const query = parse(listSchema, req.query);
+      const { skip } = pageInfo(query);
+
+      const filter = { ...ownOnly(req) };
+      if (isAdmin(req) && query.cashierId) filter.cashierId = query.cashierId;
+      if (query.flagged !== undefined)
+        filter.flagged = query.flagged === "true";
+      if (query.search)
+        filter.invoiceNumber = new RegExp(escapeRegex(query.search), "i");
+      if (query.from || query.to) {
+        filter.soldAt = {
+          ...(query.from ? { $gte: new Date(query.from) } : {}),
+          ...(query.to ? { $lte: new Date(query.to) } : {}),
+        };
+      }
+
+      const [sales, total] = await Promise.all([
+        Sale.find(filter)
+          .select("-items -requestHash")
+          .sort({ soldAt: -1, _id: -1 })
+          .skip(skip)
+          .limit(query.limit),
+        Sale.countDocuments(filter),
+      ]);
+      res.json({
+        items: sales.map((sale) =>
+          publicSale(sale, { ...view(req), includeItems: false }),
+        ),
+        page: query.page,
+        limit: query.limit,
+        total,
+      });
+    }),
+  );
+
+  // Declared before "/:id" so "by-invoice" is not mistaken for an id.
+  router.get(
+    "/by-invoice/:invoiceNumber",
+    asyncHandler(async (req, res) => {
+      const sale = await Sale.findOne({
+        invoiceNumber: String(req.params.invoiceNumber),
+        ...ownOnly(req),
+      });
+      if (!sale) throw notFound("Sale not found");
+      res.json({ sale: publicSale(sale, view(req)) });
+    }),
+  );
+
+  router.get(
+    "/:id",
+    asyncHandler(async (req, res) => {
+      const sale = await Sale.findOne({ _id: req.params.id, ...ownOnly(req) });
+      if (!sale) throw notFound("Sale not found");
+      res.json({ sale: publicSale(sale, view(req)) });
+    }),
+  );
+
+  // There is deliberately no way to edit or delete a completed sale.
+  return router;
+}
+
+
+=== server\src\routes\settings.js ===
+import { Router } from "express";
+import { z } from "zod";
+import { requireAuth, requireRole } from "../auth/middleware.js";
+import { asyncHandler } from "../http/asyncHandler.js";
+import { parse } from "../http/validate.js";
+import { getShopSettings, publicSettings } from "../models/Settings.js";
+import { audit } from "../services/audit.js";
+
+const updateSchema = z
+  .object({
+    shopName: z.string().trim().min(1).max(80),
+    address: z.string().trim().max(200),
+    phone: z.string().trim().max(20),
+    taxId: z.string().trim().max(20),
+    invoicePrefix: z
+      .string()
+      .trim()
+      .regex(/^[A-Z0-9]{1,6}$/, "Use 1-6 capital letters or digits"),
+    receiptFooter: z.string().trim().max(120),
+    receiptPaperWidth: z.enum(["58", "80"]),
+    allowNegativeStock: z.boolean(),
+    roundToRupee: z.boolean(),
+    maxCashierDiscountPercent: z.number().min(0).max(100),
+  })
+  .partial()
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "Nothing to update",
+  });
+
+export function settingsRouter(config) {
+  const router = Router();
+  const authenticate = requireAuth(config);
+
+  router.get(
+    "/",
+    authenticate,
+    asyncHandler(async (req, res) => {
+      res.json({ settings: publicSettings(await getShopSettings()) });
+    }),
+  );
+
+  router.patch(
+    "/",
+    authenticate,
+    requireRole("admin"),
+    asyncHandler(async (req, res) => {
+      const changes = parse(updateSchema, req.body);
+      const settings = await getShopSettings();
+      Object.assign(settings, changes);
+      await settings.save();
+
+      await audit(req, {
+        action: "settings.updated",
+        entity: "settings",
+        entityId: "shop",
+        details: { changes },
+      });
+      res.json({ settings: publicSettings(settings) });
+    }),
+  );
+
+  return router;
+}
+
+
+=== server\src\routes\sync.js ===
+import { Router } from "express";
+import { requireAuth, requireRole } from "../auth/middleware.js";
+import { pushEnvelopeSchema } from "../domain/syncSchemas.js";
+import { AppError } from "../errors.js";
+import { asyncHandler } from "../http/asyncHandler.js";
+import { parse } from "../http/validate.js";
+import { Product } from "../models/Product.js";
+import { Sale } from "../models/Sale.js";
+import { Variant } from "../models/Variant.js";
+import { audit } from "../services/audit.js";
+import { applyOperation } from "../services/sync.js";
+
+export function syncRouter(config) {
+  const router = Router();
+  router.use(requireAuth(config));
+
+  // Applies a batch IN ORDER. Every operation gets its own result, and one failure
+  // never stops the others.
+  router.post(
+    "/push",
+    asyncHandler(async (req, res) => {
+      const { ops } = parse(pushEnvelopeSchema, req.body);
+      const results = [];
+
+      for (const [index, op] of ops.entries()) {
+        const id = typeof op.data?.id === "string" ? op.data.id : null;
+        try {
+          const result = await applyOperation(op, req);
+          results.push({ index, type: op.type, id, ...result });
+        } catch (err) {
+          if (err instanceof AppError) {
+            results.push({
+              index,
+              type: op.type,
+              id,
+              status: "rejected", // retrying will not help; a person has to look at it
+              code: err.code,
+              message: err.message,
+              ...(err.details ? { details: err.details } : {}),
+            });
+          } else {
+            console.error(`[${req.id}] sync operation failed`, err);
+            results.push({
+              index,
+              type: op.type,
+              id,
+              status: "error", // temporary; the device will try again
+              code: "INTERNAL_ERROR",
+              message:
+                "The server could not process this item. Try again later.",
+            });
+          }
+        }
+      }
+
+      const count = (status) =>
+        results.filter((r) => r.status === status).length;
+      await audit(req, {
+        action: "sync.push",
+        entity: "sync",
+        details: {
+          total: results.length,
+          applied: count("applied"),
+          duplicate: count("duplicate"),
+          rejected: count("rejected"),
+          error: count("error"),
+        },
+      });
+
+      res.json({ results });
+    }),
+  );
+
+  // The server's clock and record counts. The app uses the clock to warn when the
+  // device's own clock is wrong.
+  router.get(
+    "/status",
+    asyncHandler(async (req, res) => {
+      res.json({
+        serverTime: new Date().toISOString(),
+        counts: {
+          products: await Product.countDocuments(),
+          variants: await Variant.countDocuments(),
+          sales: await Sale.countDocuments(),
+        },
+      });
+    }),
+  );
+
+  // Every item's stock as the server sees it, so the app can compare with its own.
+  router.get(
+    "/stock-levels",
+    requireRole("admin"),
+    asyncHandler(async (req, res) => {
+      const variants = await Variant.find({}, "sku currentStock status").lean();
+      res.json({
+        items: variants.map((v) => ({
+          variantId: v._id,
+          sku: v.sku,
+          currentStock: v.currentStock,
+          status: v.status,
+        })),
+      });
+    }),
+  );
+
+  return router;
+}
+
+
+=== server\src\routes\users.js ===
+import { Router } from "express";
+import { z } from "zod";
+import { badRequest, conflict, notFound } from "../errors.js";
+import { requireAuth, requireRole } from "../auth/middleware.js";
+import { passwordSchema } from "../auth/passwordPolicy.js";
+import { hashPassword } from "../auth/passwords.js";
+import { asyncHandler } from "../http/asyncHandler.js";
+import { parse } from "../http/validate.js";
+import { User, publicUser } from "../models/User.js";
+import { audit } from "../services/audit.js";
+
+const createSchema = z
+  .object({
+    username: z
+      .string()
+      .trim()
+      .toLowerCase()
+      .min(3)
+      .max(30)
+      .regex(/^[a-z0-9._-]+$/, "Use letters, digits, dot, dash or underscore"),
+    displayName: z.string().trim().min(1).max(60),
+    password: passwordSchema,
+    role: z.enum(["admin", "cashier"]),
+  })
+  .strict();
+
+const updateSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(60),
+    role: z.enum(["admin", "cashier"]),
+    active: z.boolean(),
+    password: passwordSchema,
+  })
+  .partial()
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "Nothing to update",
+  });
+
+// Only admins manage accounts. There is no public sign-up anywhere.
+export function usersRouter(config) {
+  const router = Router();
+  router.use(requireAuth(config), requireRole("admin"));
+
+  router.get(
+    "/",
+    asyncHandler(async (req, res) => {
+      const users = await User.find().sort({ createdAt: 1 });
+      res.json({ users: users.map(publicUser) });
+    }),
+  );
+
+  router.post(
+    "/",
+    asyncHandler(async (req, res) => {
+      const data = parse(createSchema, req.body);
+      if (await User.exists({ username: data.username })) {
+        throw conflict("USERNAME_TAKEN", "That username is already in use");
+      }
+
+      const user = await User.create({
+        username: data.username,
+        displayName: data.displayName,
+        role: data.role,
+        passwordHash: await hashPassword(data.password, config.bcryptCost),
+      });
+
+      await audit(req, {
+        action: "user.created",
+        entity: "user",
+        entityId: user._id,
+        details: { username: user.username, role: user.role },
+      });
+      res.status(201).json({ user: publicUser(user) });
+    }),
+  );
+
+  router.patch(
+    "/:id",
+    asyncHandler(async (req, res) => {
+      const changes = parse(updateSchema, req.body);
+      const target = await User.findById(req.params.id).select("+passwordHash");
+      if (!target) throw notFound("User not found");
+
+      // Stops an admin locking themselves (and so possibly everyone) out.
+      const isSelf = target._id === req.user._id;
+      if (
+        isSelf &&
+        (changes.active === false || (changes.role && changes.role !== "admin"))
+      ) {
+        throw badRequest(
+          "You cannot disable or demote your own account",
+          "CANNOT_MODIFY_SELF",
+        );
+      }
+
+      const changed = [];
+      let invalidateTokens = false;
+
+      if (
+        changes.displayName !== undefined &&
+        changes.displayName !== target.displayName
+      ) {
+        target.displayName = changes.displayName;
+        changed.push("displayName");
+      }
+      if (changes.role !== undefined && changes.role !== target.role) {
+        target.role = changes.role;
+        changed.push("role");
+        invalidateTokens = true;
+      }
+      if (changes.active !== undefined && changes.active !== target.active) {
+        target.active = changes.active;
+        changed.push("active");
+        if (changes.active === false) invalidateTokens = true;
+        target.failedLogins = 0;
+        target.lockedUntil = null;
+      }
+      if (changes.password !== undefined) {
+        target.passwordHash = await hashPassword(
+          changes.password,
+          config.bcryptCost,
+        );
+        target.failedLogins = 0;
+        target.lockedUntil = null; // a password reset also unlocks the account
+        changed.push("password");
+        invalidateTokens = true;
+      }
+
+      if (invalidateTokens) target.tokenVersion += 1;
+      await target.save();
+
+      await audit(req, {
+        action: "user.updated",
+        entity: "user",
+        entityId: target._id,
+        details: { username: target.username, changed },
+      });
+      res.json({ user: publicUser(target) });
+    }),
+  );
+
+  return router;
+}
+
+
+

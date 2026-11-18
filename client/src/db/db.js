@@ -31,3 +31,10 @@ db.version(3).stores({
 db.version(4).stores({
   sales: 'id, &invoiceNumber, createdAt, status, syncStatus, paymentStatus',
 })
+
+// Version 5: bills whose payment or cancellation still has to be sent to the server.
+// `paymentPending` / `cancelPending` are 1 while something is waiting, and absent otherwise.
+db.version(5).stores({
+  sales:
+    'id, &invoiceNumber, createdAt, status, syncStatus, paymentStatus, paymentPending, cancelPending',
+})

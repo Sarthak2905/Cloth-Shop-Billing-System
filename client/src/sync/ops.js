@@ -23,7 +23,7 @@ export function productOp(product) {
     data: {
       id: product.id,
       name: product.name,
-      category: product.category,
+      category: product.category ?? '',
       brand: product.brand ?? '',
       supplier: product.supplier ?? '',
       status: product.status,
@@ -38,11 +38,14 @@ export function productOp(product) {
 }
 
 // Stock is deliberately NOT part of an item. It travels as movements and sales.
+// For fabric (unit 'meter') stock and quantities are whole centimetres.
 const VARIANT_FIELDS = [
   'productId',
   'sku',
   'barcode',
   'size',
+  'unit',
+  'packSize',
   'costPaise',
   'mrpPaise',
   'sellingPricePaise',
@@ -55,12 +58,17 @@ const VARIANT_FIELDS = [
 export function variantOp(variant) {
   const v = {
     ...variant,
+    sku: variant.sku ?? '',
+    size: variant.size ?? '',
+    unit: variant.unit ?? 'piece',
     taxRatePercent: variant.taxRatePercent ?? 0,
     priceIncludesTax: variant.priceIncludesTax ?? true,
     reorderThreshold: variant.reorderThreshold ?? 0,
   }
   const data = { id: v.id }
-  for (const field of VARIANT_FIELDS) data[field] = v[field]
+  for (const field of VARIANT_FIELDS) {
+    if (v[field] !== undefined && v[field] !== null) data[field] = v[field]
+  }
 
   return {
     type: 'variant.upsert',
@@ -69,9 +77,9 @@ export function variantOp(variant) {
     entityId: v.id,
     entityTime: v.createdAt,
     key: `${v.createdAt}|${v.id}`,
-    label: v.sku,
+    label: v.sku || v.barcode,
     fingerprint: fingerprint(
-      JSON.stringify(VARIANT_FIELDS.map((field) => v[field])),
+      JSON.stringify(VARIANT_FIELDS.map((field) => v[field] ?? null)),
     ),
   }
 }
@@ -101,9 +109,28 @@ const discountOf = (discount) => ({
   value: discount.value,
 })
 
+const paymentLineOf = (p) => ({
+  method: p.method,
+  amountPaise: p.amountPaise,
+  ...(p.reference ? { reference: p.reference } : {}),
+})
+
+// A bill's payment. New bills have a list of payment lines (empty = payment pending, a
+// bill paid in parts has several). Older bills have one payment.
+function paymentFields(sale) {
+  if (Array.isArray(sale.payments)) {
+    return { payments: sale.payments.map(paymentLineOf) }
+  }
+  const payment = { method: sale.payment.method }
+  if (sale.payment.method === 'cash')
+    payment.amountTenderedPaise = sale.payment.amountTenderedPaise
+  if (sale.payment.reference) payment.reference = sale.payment.reference
+  return { payment }
+}
+
 // The server recalculates every total itself. Only what the customer saw (the unit
-// prices and discounts), which items had discounts switched off, and the total the
-// device calculated (to compare) are sent.
+// prices and discounts), which items had discounts switched off, what each item cost,
+// and the total the device calculated (to compare) are sent.
 export function saleOp(sale, items) {
   const lines = [...items]
     .sort((a, b) => a.lineNumber - b.lineNumber)
@@ -112,13 +139,13 @@ export function saleOp(sale, items) {
       quantity: item.quantity,
       unitPricePaise: item.unitPricePaise,
       ...(item.discount ? { discount: discountOf(item.discount) } : {}),
-      ...(item.discountExcluded ? { noDiscount: true } : {}),
+      ...(item.discountExcluded || item.discountAllowed === false
+        ? { noDiscount: true }
+        : {}),
+      ...(Number.isInteger(item.costPaise)
+        ? { costPaise: item.costPaise }
+        : {}),
     }))
-
-  const payment = { method: sale.payment.method }
-  if (sale.payment.method === 'cash')
-    payment.amountTenderedPaise = sale.payment.amountTenderedPaise
-  if (sale.payment.reference) payment.reference = sale.payment.reference
 
   return {
     type: 'sale.create',
@@ -131,13 +158,67 @@ export function saleOp(sale, items) {
       ...(sale.billDiscount
         ? { billDiscount: discountOf(sale.billDiscount) }
         : {}),
-      payment,
+      ...paymentFields(sale),
       claimedTotalPaise: sale.totalPaise,
+      ...(sale.replacesSaleId
+        ? {
+            replacesSaleId: sale.replacesSaleId,
+            ...(sale.replacesInvoice
+              ? { replacesInvoice: sale.replacesInvoice }
+              : {}),
+          }
+        : {}),
     },
     kind: 'sale',
     entityId: sale.id,
     entityTime: sale.createdAt,
     key: `${sale.createdAt}|${sale.id}`,
     label: sale.invoiceNumber,
+    // which version of the payment this operation carries
+    paymentRev: sale.paymentRev ?? 0,
+  }
+}
+
+// The payment of a bill that is already on the server, recorded or changed later.
+// `rev` goes up with every change, so an older version arriving late is ignored.
+export function salePaymentOp(sale) {
+  const rev = sale.paymentRev ?? 0
+  return {
+    type: 'sale.payment',
+    data: {
+      saleId: sale.id,
+      payments: (sale.payments ?? []).map(paymentLineOf),
+      ...(sale.paymentRecordedAt ? { recordedAt: sale.paymentRecordedAt } : {}),
+      rev,
+    },
+    kind: 'salepay',
+    entityId: sale.id,
+    entityTime: sale.createdAt,
+    key: `${sale.createdAt}|${sale.id}`,
+    label: `Payment of ${sale.invoiceNumber}`,
+    paymentRev: rev,
+  }
+}
+
+// A bill that was cancelled on this device (usually replaced by a corrected bill).
+export function saleCancelOp(sale) {
+  return {
+    type: 'sale.cancel',
+    data: {
+      saleId: sale.id,
+      cancelledAt: sale.cancelledAt,
+      reason: sale.cancelReason,
+      ...(sale.replacedBySaleId
+        ? { replacedBySaleId: sale.replacedBySaleId }
+        : {}),
+      ...(sale.replacedByInvoice
+        ? { replacedByInvoice: sale.replacedByInvoice }
+        : {}),
+    },
+    kind: 'salecancel',
+    entityId: sale.id,
+    entityTime: sale.createdAt,
+    key: `${sale.createdAt}|${sale.id}`,
+    label: `Cancellation of ${sale.invoiceNumber}`,
   }
 }

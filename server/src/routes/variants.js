@@ -7,7 +7,7 @@ import {
   stockAdjustmentSchema,
   variantUpdateSchema,
 } from "../domain/catalogSchemas.js";
-import { AppError, notFound } from "../errors.js";
+import { notFound } from "../errors.js";
 import { asyncHandler } from "../http/asyncHandler.js";
 import { translateDuplicate } from "../http/duplicates.js";
 import { pageInfo, paginationFields } from "../http/pagination.js";
@@ -118,17 +118,6 @@ export function variantsRouter(config) {
       const variant = await Variant.findById(req.params.id);
       if (!variant) throw notFound("Variant not found");
 
-      const nextSelling =
-        changes.sellingPricePaise ?? variant.sellingPricePaise;
-      const nextMrp = changes.mrpPaise ?? variant.mrpPaise;
-      if (nextSelling > nextMrp) {
-        throw new AppError(400, "VALIDATION_ERROR", "Some fields are invalid", [
-          {
-            field: "sellingPricePaise",
-            message: "Selling price cannot exceed MRP",
-          },
-        ]);
-      }
 
       const changed = {};
       for (const [field, value] of Object.entries(changes)) {

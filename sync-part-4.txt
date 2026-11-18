@@ -1,0 +1,892 @@
+﻿=== server\src\routes\variants.js ===
+import { Router } from "express";
+import { z } from "zod";
+import { requireAuth, requireRole } from "../auth/middleware.js";
+import { runInTransaction } from "../db/transaction.js";
+import {
+  barcodeParamSchema,
+  stockAdjustmentSchema,
+  variantUpdateSchema,
+} from "../domain/catalogSchemas.js";
+import { AppError, notFound } from "../errors.js";
+import { asyncHandler } from "../http/asyncHandler.js";
+import { translateDuplicate } from "../http/duplicates.js";
+import { pageInfo, paginationFields } from "../http/pagination.js";
+import { parse } from "../http/validate.js";
+import { escapeRegex } from "../lib/text.js";
+import { Product, publicProduct } from "../models/Product.js";
+import { getShopSettings } from "../models/Settings.js";
+import { StockMovement, publicMovement } from "../models/StockMovement.js";
+import { Variant, publicVariant } from "../models/Variant.js";
+import { audit } from "../services/audit.js";
+import { applyStockChange } from "../services/stock.js";
+
+const listSchema = z.object({
+  productId: z.string().min(1).max(64).optional(),
+  search: z.string().trim().max(60).optional(),
+  status: z.enum(["active", "archived", "all"]).default("active"),
+  lowStock: z.enum(["true", "false"]).optional(),
+  ...paginationFields,
+});
+
+const movementsSchema = z.object({ ...paginationFields });
+
+export function variantsRouter(config) {
+  const router = Router();
+  router.use(requireAuth(config));
+  const adminOnly = requireRole("admin");
+  const view = (req) => ({ includeCost: req.user.role === "admin" });
+
+  router.get(
+    "/",
+    asyncHandler(async (req, res) => {
+      const query = parse(listSchema, req.query);
+      const { skip } = pageInfo(query);
+
+      const filter = {};
+      if (query.productId) filter.productId = query.productId;
+      if (query.status !== "all") filter.status = query.status;
+      if (query.lowStock === "true") {
+        filter.$expr = { $lte: ["$currentStock", "$reorderThreshold"] };
+      }
+      if (query.search) {
+        const pattern = new RegExp(escapeRegex(query.search), "i");
+        const matchingProducts = await Product.find(
+          { name: pattern },
+          "_id",
+        ).lean();
+        filter.$or = [
+          { sku: pattern },
+          { barcode: pattern },
+          { productId: { $in: matchingProducts.map((p) => p._id) } },
+        ];
+      }
+
+      const [variants, total] = await Promise.all([
+        Variant.find(filter).sort({ sku: 1 }).skip(skip).limit(query.limit),
+        Variant.countDocuments(filter),
+      ]);
+
+      const products = await Product.find(
+        { _id: { $in: [...new Set(variants.map((v) => v.productId))] } },
+        "name",
+      ).lean();
+      const names = new Map(products.map((p) => [p._id, p.name]));
+
+      res.json({
+        items: variants.map((v) => ({
+          ...publicVariant(v, view(req)),
+          productName: names.get(v.productId) ?? null,
+        })),
+        page: query.page,
+        limit: query.limit,
+        total,
+      });
+    }),
+  );
+
+  // Declared before "/:id" so "barcode" is not mistaken for an id.
+  router.get(
+    "/barcode/:barcode",
+    asyncHandler(async (req, res) => {
+      const barcode = parse(barcodeParamSchema, req.params.barcode);
+      const variant = await Variant.findOne({ barcode });
+      if (!variant) throw notFound(`No product found for barcode ${barcode}`);
+
+      const product = await Product.findById(variant.productId);
+      res.json({
+        variant: publicVariant(variant, view(req)),
+        product: product ? publicProduct(product) : null,
+        sellable: variant.status === "active" && product?.status === "active",
+      });
+    }),
+  );
+
+  router.get(
+    "/:id",
+    asyncHandler(async (req, res) => {
+      const variant = await Variant.findById(req.params.id);
+      if (!variant) throw notFound("Variant not found");
+      res.json({ variant: publicVariant(variant, view(req)) });
+    }),
+  );
+
+  router.patch(
+    "/:id",
+    adminOnly,
+    asyncHandler(async (req, res) => {
+      const changes = parse(variantUpdateSchema, req.body);
+      const variant = await Variant.findById(req.params.id);
+      if (!variant) throw notFound("Variant not found");
+
+      const nextSelling =
+        changes.sellingPricePaise ?? variant.sellingPricePaise;
+      const nextMrp = changes.mrpPaise ?? variant.mrpPaise;
+      if (nextSelling > nextMrp) {
+        throw new AppError(400, "VALIDATION_ERROR", "Some fields are invalid", [
+          {
+            field: "sellingPricePaise",
+            message: "Selling price cannot exceed MRP",
+          },
+        ]);
+      }
+
+      const changed = {};
+      for (const [field, value] of Object.entries(changes)) {
+        if (variant[field] !== value) {
+          changed[field] = { from: variant[field], to: value };
+          variant[field] = value;
+        }
+      }
+
+      if (Object.keys(changed).length > 0) {
+        try {
+          await variant.save();
+        } catch (err) {
+          throw translateDuplicate(err, changes);
+        }
+        await audit(req, {
+          action: "variant.updated",
+          entity: "variant",
+          entityId: variant._id,
+          details: { sku: variant.sku, changes: changed },
+        });
+      }
+      res.json({ variant: publicVariant(variant, { includeCost: true }) });
+    }),
+  );
+
+  router.post(
+    "/:id/stock-adjustments",
+    adminOnly,
+    asyncHandler(async (req, res) => {
+      const { quantityChange, reason } = parse(stockAdjustmentSchema, req.body);
+      const settings = await getShopSettings();
+
+      const { variant, movement } = await runInTransaction((session) =>
+        applyStockChange({
+          variantId: req.params.id,
+          quantityChange,
+          type: "adjustment",
+          reason,
+          userId: req.user._id,
+          allowNegative: settings.allowNegativeStock,
+          session,
+        }),
+      );
+
+      await audit(req, {
+        action: "stock.adjusted",
+        entity: "variant",
+        entityId: variant._id,
+        details: {
+          sku: variant.sku,
+          quantityChange,
+          reason,
+          stockAfter: variant.currentStock,
+        },
+      });
+      res.status(201).json({
+        variant: publicVariant(variant, { includeCost: true }),
+        movement: publicMovement(movement),
+      });
+    }),
+  );
+
+  router.get(
+    "/:id/stock-movements",
+    adminOnly,
+    asyncHandler(async (req, res) => {
+      const query = parse(movementsSchema, req.query);
+      const { skip } = pageInfo(query);
+
+      if (!(await Variant.exists({ _id: req.params.id })))
+        throw notFound("Variant not found");
+
+      const filter = { variantId: req.params.id };
+      const [items, total] = await Promise.all([
+        StockMovement.find(filter)
+          .sort({ createdAt: -1, _id: -1 })
+          .skip(skip)
+          .limit(query.limit),
+        StockMovement.countDocuments(filter),
+      ]);
+      res.json({
+        items: items.map(publicMovement),
+        page: query.page,
+        limit: query.limit,
+        total,
+      });
+    }),
+  );
+
+  return router;
+}
+
+
+=== server\src\services\sales.js ===
+import { createHash } from "node:crypto";
+import { runInTransaction } from "../db/transaction.js";
+import { calculateTotals } from "../domain/calc.js";
+import { AppError, conflict } from "../errors.js";
+import { nextSequence } from "../models/Counter.js";
+import { Product } from "../models/Product.js";
+import { Sale } from "../models/Sale.js";
+import { getShopSettings } from "../models/Settings.js";
+import { Variant } from "../models/Variant.js";
+import { applyStockChange } from "./stock.js";
+
+const FUTURE_TOLERANCE_MS = 10 * 60 * 1000;
+
+const invalid = (field, message) =>
+  new AppError(400, "VALIDATION_ERROR", "Some fields are invalid", [
+    { field, message },
+  ]);
+
+// A fingerprint of what the sale says. The same id with different content is refused.
+function fingerprintOf(data) {
+  const lines = data.lines
+    .map((l) => [l.variantId, l.quantity, l.unitPricePaise, l.discount ?? null])
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  const canonical = {
+    lines,
+    billDiscount: data.billDiscount ?? null,
+    payment: [data.payment.method, data.payment.amountTenderedPaise ?? null],
+    invoiceNumber: data.invoiceNumber ?? null,
+  };
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+function existingResult(existing, fingerprint) {
+  if (existing.requestHash !== fingerprint) {
+    throw conflict(
+      "IDEMPOTENCY_KEY_REUSED",
+      "A different sale was already saved with this id",
+    );
+  }
+  return { sale: existing, duplicate: true };
+}
+
+// Saves a sale. Returns { sale, duplicate }.
+//   online sale  : a broken shop rule REFUSES the sale (422/409)
+//   offline sale : the sale already happened, so it is saved and FLAGGED instead
+export async function createSale({ data, user }) {
+  const settings = await getShopSettings();
+  const fingerprint = fingerprintOf(data);
+  const offline = data.offline === true;
+
+  try {
+    return await runInTransaction((session) =>
+      saveSale({ data, user, settings, fingerprint, offline, session }),
+    );
+  } catch (err) {
+    if (err?.code === 11000) {
+      const fields = Object.keys(err.keyPattern ?? err.keyValue ?? {});
+      if (fields.includes("_id")) {
+        // Another request saved this same sale at the same moment.
+        const existing = await Sale.findById(data.id);
+        if (existing) return existingResult(existing, fingerprint);
+      }
+      if (fields.includes("invoiceNumber")) {
+        throw conflict(
+          "INVOICE_NUMBER_TAKEN",
+          "That invoice number is already used by another sale",
+        );
+      }
+    }
+    throw err;
+  }
+}
+
+async function saveSale({
+  data,
+  user,
+  settings,
+  fingerprint,
+  offline,
+  session,
+}) {
+  // 1. Already saved? Then this is a repeat of the same request.
+  const existing = await Sale.findById(data.id).session(session);
+  if (existing) return existingResult(existing, fingerprint);
+
+  // 2. The sale time must not be in the future.
+  const now = new Date();
+  const soldAt = data.soldAt ? new Date(data.soldAt) : now;
+  if (soldAt.getTime() > now.getTime() + FUTURE_TOLERANCE_MS) {
+    throw invalid("soldAt", "The sale time is in the future");
+  }
+
+  // 3. Load the items and their products.
+  const variants = await Variant.find({
+    _id: { $in: data.lines.map((l) => l.variantId) },
+  }).session(session);
+  const variantById = new Map(variants.map((v) => [v._id, v]));
+  const products = await Product.find({
+    _id: { $in: [...new Set(variants.map((v) => v.productId))] },
+  }).session(session);
+  const productById = new Map(products.map((p) => [p._id, p]));
+
+  // 4. Check every line against the catalogue. Problems are collected, not thrown.
+  const violations = [];
+  const lineViews = data.lines.map((line) => {
+    const variant = variantById.get(line.variantId);
+    if (!variant) {
+      throw new AppError(
+        422,
+        "UNKNOWN_VARIANT",
+        `Item ${line.variantId} does not exist`,
+        [{ variantId: line.variantId }],
+      );
+    }
+    const product = productById.get(variant.productId);
+    const label = `${product?.name ?? "Item"} (size ${variant.size})`;
+
+    if (variant.status !== "active" || product?.status !== "active") {
+      violations.push({
+        code: "ITEM_ARCHIVED",
+        variantId: variant._id,
+        message: `${label} is archived`,
+      });
+    }
+    if (line.unitPricePaise !== variant.sellingPricePaise) {
+      violations.push({
+        code: "PRICE_DIFFERS_FROM_CATALOG",
+        variantId: variant._id,
+        message: `${label} was sold at ${line.unitPricePaise} paise, the catalogue price is ${variant.sellingPricePaise}`,
+      });
+    }
+    if (line.unitPricePaise > variant.mrpPaise) {
+      violations.push({
+        code: "PRICE_ABOVE_MRP",
+        variantId: variant._id,
+        message: `${label} was sold above its MRP`,
+      });
+    }
+    return { line, variant, product };
+  });
+
+  // 5. The server's own calculation. Tax settings come from the catalogue.
+  const options = { roundToRupee: settings.roundToRupee };
+  const cart = {
+    lines: lineViews.map(({ line, variant }) => ({
+      variantId: variant._id,
+      unitPricePaise: line.unitPricePaise,
+      quantity: line.quantity,
+      taxRatePercent: variant.taxRatePercent,
+      priceIncludesTax: variant.priceIncludesTax,
+      discount: line.discount ?? null,
+    })),
+    billDiscount: data.billDiscount ?? null,
+  };
+
+  // Impossible discounts are refused in every mode.
+  for (const { line } of lineViews) {
+    if (
+      line.discount?.type === "amount" &&
+      line.discount.value > line.unitPricePaise * line.quantity
+    ) {
+      throw invalid("lines", "A discount cannot be more than the item total");
+    }
+  }
+  const beforeBillDiscount = calculateTotals(
+    { ...cart, billDiscount: null },
+    options,
+  );
+  if (
+    cart.billDiscount?.type === "amount" &&
+    cart.billDiscount.value >
+      beforeBillDiscount.subtotalPaise - beforeBillDiscount.itemDiscountPaise
+  ) {
+    throw invalid(
+      "billDiscount",
+      "A discount cannot be more than the bill total",
+    );
+  }
+
+  const totals = calculateTotals(cart, options);
+
+  // 6. Cashier discount limit (admins are not limited). A little slack for rounding.
+  if (user.role === "cashier") {
+    const limitBp = Math.round(settings.maxCashierDiscountPercent * 100);
+    const allowed =
+      Math.ceil((totals.subtotalPaise * limitBp) / 10000) +
+      cart.lines.length +
+      1;
+    if (totals.discountPaise > allowed) {
+      violations.push({
+        code: "DISCOUNT_OVER_LIMIT",
+        message: `The discount is more than the ${settings.maxCashierDiscountPercent}% a cashier may give`,
+      });
+    }
+  }
+
+  // 7. The total the client claims must match the server's total.
+  if (
+    data.claimedTotalPaise !== undefined &&
+    data.claimedTotalPaise !== totals.totalPaise
+  ) {
+    violations.push({
+      code: "TOTAL_MISMATCH",
+      message: `The total sent (${data.claimedTotalPaise}) differs from the calculated total (${totals.totalPaise})`,
+    });
+  }
+
+  // 8. Payment.
+  const isCash = data.payment.method === "cash";
+  const tendered = isCash
+    ? (data.payment.amountTenderedPaise ?? totals.totalPaise)
+    : totals.totalPaise;
+  let changePaise = 0;
+  if (tendered < totals.totalPaise) {
+    if (!offline)
+      throw new AppError(
+        400,
+        "INSUFFICIENT_PAYMENT",
+        "Cash received is less than the total",
+      );
+    violations.push({
+      code: "PAYMENT_SHORT",
+      message: `The amount received (${tendered}) is less than the total (${totals.totalPaise})`,
+    });
+  } else {
+    changePaise = tendered - totals.totalPaise;
+  }
+
+  // 9. An online sale that breaks any rule is refused. An offline one is flagged.
+  if (violations.length > 0 && !offline) {
+    throw new AppError(
+      422,
+      "SALE_NOT_ALLOWED",
+      "This sale breaks a shop rule",
+      violations,
+    );
+  }
+  const flags = [...violations];
+
+  // 10. Invoice number: keep the device's own, or allocate one from the server series.
+  let invoiceNumber = data.invoiceNumber;
+  if (!invoiceNumber) {
+    const sequence = await nextSequence("invoice", session);
+    invoiceNumber = `${settings.invoicePrefix}-S${String(sequence).padStart(6, "0")}`;
+  }
+
+  // 11. Stock. A fixed order keeps concurrent sales from blocking each other.
+  const ordered = [...lineViews].sort((a, b) =>
+    a.variant._id < b.variant._id ? -1 : 1,
+  );
+  for (const { line, variant } of ordered) {
+    const { variant: after } = await applyStockChange({
+      variantId: variant._id,
+      quantityChange: -line.quantity,
+      type: "sale",
+      referenceId: data.id,
+      userId: user._id,
+      allowNegative: offline || settings.allowNegativeStock,
+      session,
+    });
+    if (offline && !settings.allowNegativeStock && after.currentStock < 0) {
+      flags.push({
+        code: "STOCK_SHORTFALL",
+        variantId: variant._id,
+        message: `${variant.sku} is now ${-after.currentStock} below zero`,
+      });
+    }
+  }
+
+  // 12. Save the sale with a snapshot of every line.
+  const items = lineViews.map(({ line, variant, product }, index) => {
+    const t = totals.lines[index];
+    return {
+      lineNumber: index + 1,
+      variantId: variant._id,
+      productId: variant.productId,
+      productName: product?.name ?? "",
+      sku: variant.sku,
+      barcode: variant.barcode,
+      size: variant.size,
+      quantity: line.quantity,
+      unitPricePaise: line.unitPricePaise,
+      mrpPaise: variant.mrpPaise,
+      costPaise: variant.costPaise,
+      taxRatePercent: variant.taxRatePercent,
+      priceIncludesTax: variant.priceIncludesTax,
+      discount: line.discount ?? null,
+      grossPaise: t.grossPaise,
+      lineDiscountPaise: t.lineDiscountPaise,
+      billDiscountSharePaise: t.billDiscountSharePaise,
+      taxableValuePaise: t.taxableValuePaise,
+      taxPaise: t.taxPaise,
+      lineTotalPaise: t.lineTotalPaise,
+    };
+  });
+
+  const [sale] = await Sale.create(
+    [
+      {
+        _id: data.id,
+        invoiceNumber,
+        status: "completed",
+        source: offline ? "offline-sync" : "online",
+        soldAt,
+        cashierId: user._id,
+        cashierName: user.displayName,
+        shop: {
+          name: settings.shopName,
+          address: settings.address,
+          phone: settings.phone,
+          taxId: settings.taxId,
+          footer: settings.receiptFooter,
+        },
+        itemCount: totals.itemCount,
+        subtotalPaise: totals.subtotalPaise,
+        itemDiscountPaise: totals.itemDiscountPaise,
+        billDiscountPaise: totals.billDiscountPaise,
+        discountPaise: totals.discountPaise,
+        billDiscount: cart.billDiscount,
+        taxableValuePaise: totals.taxableValuePaise,
+        taxPaise: totals.taxPaise,
+        taxIncludedPaise: totals.taxIncludedPaise,
+        taxAddedPaise: totals.taxAddedPaise,
+        exactTotalPaise: totals.exactTotalPaise,
+        roundOffPaise: totals.roundOffPaise,
+        totalPaise: totals.totalPaise,
+        payment: {
+          method: data.payment.method,
+          amountTenderedPaise: tendered,
+          changePaise,
+          reference: data.payment.reference ?? "",
+        },
+        items,
+        flags,
+        flagged: flags.length > 0,
+        requestHash: fingerprint,
+      },
+    ],
+    { session },
+  );
+
+  return { sale, duplicate: false };
+}
+
+
+=== server\src\services\stock.js ===
+import { badRequest, conflict, notFound } from "../errors.js";
+import { MOVEMENT_TYPES, StockMovement } from "../models/StockMovement.js";
+import { Variant } from "../models/Variant.js";
+
+// The ONLY way stock changes. Call it inside runInTransaction and pass the session:
+// the stock update and its movement record are then saved together, or not at all.
+//
+// For a removal, the update itself says "only if enough stock is there". That makes
+// it safe when many requests arrive at the same moment: they cannot oversell.
+//
+// `movementId` and `occurredAt` are used when a device syncs a change it made earlier:
+// the movement keeps the device's id (so it can never be applied twice) and its time.
+export async function applyStockChange({
+  variantId,
+  quantityChange,
+  type,
+  reason = "",
+  referenceId = null,
+  userId = null,
+  allowNegative = false,
+  movementId = null,
+  occurredAt = null,
+  session,
+}) {
+  if (!Number.isInteger(quantityChange) || quantityChange === 0) {
+    throw badRequest(
+      "Quantity change must be a non-zero whole number",
+      "VALIDATION_ERROR",
+    );
+  }
+  if (!MOVEMENT_TYPES.includes(type)) {
+    throw badRequest(`Unknown movement type "${type}"`, "VALIDATION_ERROR");
+  }
+
+  const filter = { _id: variantId };
+  if (quantityChange < 0 && !allowNegative) {
+    filter.currentStock = { $gte: -quantityChange };
+  }
+
+  const variant = await Variant.findOneAndUpdate(
+    filter,
+    { $inc: { currentStock: quantityChange } },
+    { new: true, session },
+  );
+
+  if (!variant) {
+    const existing = await Variant.findById(variantId).session(session);
+    if (!existing) throw notFound("Variant not found");
+    throw conflict(
+      "INSUFFICIENT_STOCK",
+      `Only ${existing.currentStock} in stock for ${existing.sku}`,
+      {
+        variantId,
+        available: existing.currentStock,
+        requested: -quantityChange,
+      },
+    );
+  }
+
+  const [movement] = await StockMovement.create(
+    [
+      {
+        ...(movementId ? { _id: movementId } : {}),
+        variantId,
+        type,
+        quantityChange,
+        stockAfter: variant.currentStock,
+        reason,
+        referenceId,
+        userId,
+        occurredAt: occurredAt ?? new Date(),
+      },
+    ],
+    { session },
+  );
+
+  return { variant, movement };
+}
+
+
+=== server\src\services\sync.js ===
+import { runInTransaction } from "../db/transaction.js";
+import {
+  movementDataSchema,
+  productDataSchema,
+  variantDataSchema,
+} from "../domain/syncSchemas.js";
+import { saleCreateSchema } from "../domain/saleSchemas.js";
+import { AppError } from "../errors.js";
+import { translateDuplicate } from "../http/duplicates.js";
+import { parse } from "../http/validate.js";
+import { Product } from "../models/Product.js";
+import { StockMovement } from "../models/StockMovement.js";
+import { Variant } from "../models/Variant.js";
+import { audit } from "./audit.js";
+import { createSale } from "./sales.js";
+import { applyStockChange } from "./stock.js";
+
+const PRODUCT_FIELDS = ["name", "category", "brand", "supplier", "status"];
+const VARIANT_FIELDS = [
+  "sku",
+  "barcode",
+  "size",
+  "costPaise",
+  "mrpPaise",
+  "sellingPricePaise",
+  "taxRatePercent",
+  "priceIncludesTax",
+  "reorderThreshold",
+  "status",
+];
+
+function requireAdmin(user) {
+  if (user.role !== "admin") {
+    throw new AppError(
+      403,
+      "FORBIDDEN",
+      "Only an admin can sync catalogue and stock changes",
+    );
+  }
+}
+
+const isDuplicateId = (err) =>
+  err?.code === 11000 &&
+  Object.keys(err.keyPattern ?? err.keyValue ?? {}).includes("_id");
+
+// Copies the listed fields onto a document and returns what actually changed.
+function applyFields(doc, data, fields) {
+  const changes = {};
+  for (const field of fields) {
+    if (doc[field] !== data[field]) {
+      changes[field] = { from: doc[field], to: data[field] };
+      doc[field] = data[field];
+    }
+  }
+  return changes;
+}
+
+async function upsertProduct(data, req) {
+  requireAdmin(req.user);
+
+  // Tried twice: if two requests create the same product at once, the second
+  // one finds it on its second try and simply updates it.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const existing = await Product.findById(data.id);
+
+    if (!existing) {
+      try {
+        await Product.create({
+          _id: data.id,
+          ...Object.fromEntries(PRODUCT_FIELDS.map((f) => [f, data[f]])),
+        });
+        return { status: "applied", created: true, changed: true };
+      } catch (err) {
+        if (isDuplicateId(err)) continue;
+        throw err;
+      }
+    }
+
+    const changes = applyFields(existing, data, PRODUCT_FIELDS);
+    if (Object.keys(changes).length === 0)
+      return { status: "applied", created: false, changed: false };
+
+    await existing.save();
+    await audit(req, {
+      action: "sync.product.updated",
+      entity: "product",
+      entityId: existing._id,
+      details: { changes },
+    });
+    return { status: "applied", created: false, changed: true };
+  }
+  throw new AppError(
+    409,
+    "ID_EXISTS",
+    "Could not save this product, please retry",
+  );
+}
+
+async function upsertVariant(data, req) {
+  requireAdmin(req.user);
+
+  if (!(await Product.exists({ _id: data.productId }))) {
+    throw new AppError(
+      422,
+      "PRODUCT_MISSING",
+      "The product for this item is not on the server",
+    );
+  }
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const existing = await Variant.findById(data.id);
+
+    if (!existing) {
+      try {
+        await Variant.create({
+          _id: data.id,
+          productId: data.productId,
+          currentStock: 0, // stock only ever arrives as movements
+          ...Object.fromEntries(VARIANT_FIELDS.map((f) => [f, data[f]])),
+        });
+        return { status: "applied", created: true, changed: true };
+      } catch (err) {
+        if (isDuplicateId(err)) continue;
+        throw translateDuplicate(err, data);
+      }
+    }
+
+    if (existing.productId !== data.productId) {
+      throw new AppError(
+        409,
+        "IMMUTABLE_FIELD",
+        "An item cannot be moved to a different product",
+      );
+    }
+
+    const changes = applyFields(existing, data, VARIANT_FIELDS);
+    if (Object.keys(changes).length === 0)
+      return { status: "applied", created: false, changed: false };
+
+    try {
+      await existing.save();
+    } catch (err) {
+      throw translateDuplicate(err, data);
+    }
+    await audit(req, {
+      action: "sync.variant.updated",
+      entity: "variant",
+      entityId: existing._id,
+      details: { sku: existing.sku, changes },
+    });
+    return { status: "applied", created: false, changed: true };
+  }
+  throw new AppError(
+    409,
+    "ID_EXISTS",
+    "Could not save this item, please retry",
+  );
+}
+
+async function applyMovement(data, req) {
+  requireAdmin(req.user);
+
+  if (await StockMovement.exists({ _id: data.id }))
+    return { status: "duplicate" };
+
+  try {
+    const { variant } = await runInTransaction((session) =>
+      applyStockChange({
+        variantId: data.variantId,
+        quantityChange: data.quantityChange,
+        type: data.type,
+        reason: data.reason,
+        userId: req.user._id,
+        // It already happened on the device, so it is recorded even if stock goes below zero.
+        allowNegative: true,
+        movementId: data.id,
+        occurredAt: new Date(data.createdAt),
+        session,
+      }),
+    );
+    return { status: "applied", stockAfter: variant.currentStock };
+  } catch (err) {
+    if (isDuplicateId(err)) return { status: "duplicate" };
+    throw err;
+  }
+}
+
+async function applySale(data, req) {
+  const parsed = parse(saleCreateSchema, data);
+  // Whatever the device says, a synced sale already happened. It is saved and flagged,
+  // never refused for stock or price rules.
+  const { sale, duplicate } = await createSale({
+    data: { ...parsed, offline: true },
+    user: req.user,
+  });
+
+  if (!duplicate) {
+    await audit(req, {
+      action: "sale.created",
+      entity: "sale",
+      entityId: sale._id,
+      details: {
+        invoiceNumber: sale.invoiceNumber,
+        totalPaise: sale.totalPaise,
+        source: sale.source,
+        flags: sale.flags.map((flag) => flag.code),
+      },
+    });
+  }
+  return {
+    status: duplicate ? "duplicate" : "applied",
+    invoiceNumber: sale.invoiceNumber,
+    flags: sale.flags.map((flag) => flag.code),
+  };
+}
+
+// Applies one operation. Throws an AppError for anything the server refuses.
+export async function applyOperation(op, req) {
+  switch (op.type) {
+    case "product.upsert":
+      return upsertProduct(parse(productDataSchema, op.data), req);
+    case "variant.upsert":
+      return upsertVariant(parse(variantDataSchema, op.data), req);
+    case "stock.movement":
+      return applyMovement(parse(movementDataSchema, op.data), req);
+    case "sale.create":
+      return applySale(op.data, req);
+    default:
+      throw new AppError(
+        422,
+        "UNSUPPORTED_TYPE",
+        `Unknown operation type "${op.type}"`,
+      );
+  }
+}
+
+
+

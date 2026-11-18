@@ -40,7 +40,7 @@ export async function applyStockChange({
   const variant = await Variant.findOneAndUpdate(
     filter,
     { $inc: { currentStock: quantityChange } },
-    { new: true, session },
+    { returnDocument: "after", session },
   );
 
   if (!variant) {

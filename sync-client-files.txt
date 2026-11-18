@@ -1,0 +1,1438 @@
+=== client\src\pages\SyncPage.jsx ===
+import { useState } from 'react'
+import { useLiveQuery } from 'dexie-react-hooks'
+import FormField from '../components/FormField'
+import { inputClass, primaryButton, secondaryButton } from '../components/styles'
+import { formatDateTime } from '../lib/format'
+import {
+    dismissAttention,
+    listAttention,
+    retryAllAttention,
+    retryAttention,
+} from '../sync/attention'
+import { CLOCK_WARNING_MS } from '../sync/clock'
+import { compareStock } from '../sync/stockCheck'
+import { useSync } from '../sync/SyncProvider'
+
+function LoginForm({ signIn }) {
+    const [username, setUsername] = useState('')
+    const [password, setPassword] = useState('')
+    const [error, setError] = useState('')
+    const [busy, setBusy] = useState(false)
+
+    async function handleSubmit(e) {
+        e.preventDefault()
+        setError('')
+        setBusy(true)
+        try {
+            await signIn(username.trim(), password)
+            setPassword('')
+        } catch (err) {
+            setError(err?.message || 'Could not sign in')
+        } finally {
+            setBusy(false)
+        }
+    }
+
+    return (
+        <form onSubmit={handleSubmit} className="space-y-3 rounded-xl bg-white p-4 shadow-sm" noValidate>
+            <p className="font-semibold">Sign in to the server</p>
+            <p className="text-sm text-slate-600">
+                Use the shop owner (admin) account. Billing never needs this. It is only for sending your
+                data to the server.
+            </p>
+            <FormField label="Username" htmlFor="sync-username">
+                <input
+                    id="sync-username"
+                    autoComplete="username"
+                    className={inputClass}
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                />
+            </FormField>
+            <FormField label="Password" htmlFor="sync-password">
+                <input
+                    id="sync-password"
+                    type="password"
+                    autoComplete="current-password"
+                    className={inputClass}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                />
+            </FormField>
+            {error && (
+                <p role="alert" className="text-sm text-red-600">
+                    {error}
+                </p>
+            )}
+            <button type="submit" className={primaryButton} disabled={busy}>
+                Sign in
+            </button>
+        </form>
+    )
+}
+
+function ClockNotice({ clock }) {
+    if (!clock) return null
+    if (clock.ok) return <p className="text-sm text-slate-500">Clock check: this device&apos;s time matches the server.</p>
+
+    const minutes = Math.round(Math.abs(clock.skewMs) / 60000)
+    const direction = clock.skewMs > 0 ? 'ahead of' : 'behind'
+    return (
+        <p role="alert" className="rounded-lg bg-red-100 p-3 text-sm text-red-800">
+            This device&apos;s clock is about {minutes} minutes {direction} the server (limit{' '}
+            {CLOCK_WARNING_MS / 60000}). Sales stamped too far in the future are refused. Please correct the
+            date and time on this device.
+        </p>
+    )
+}
+
+function AttentionList() {
+    const items = useLiveQuery(() => listAttention(), [])
+    if (!items || items.length === 0) return null
+
+    return (
+        <div className="space-y-2 rounded-xl border-l-4 border-red-500 bg-white p-4 shadow-sm">
+            <div className="flex items-center justify-between gap-2">
+                <p className="font-semibold">Needs attention</p>
+                <button type="button" className={secondaryButton} onClick={retryAllAttention}>
+                    Retry all
+                </button>
+            </div>
+            <p className="text-sm text-slate-600">
+                The server refused these. Nothing was lost: they are still on this device. Fix the cause
+                (for example change a duplicate barcode), then retry.
+            </p>
+            <ul className="space-y-2">
+                {items.map((item) => (
+                    <li key={item.id} data-testid="attention-item" className="rounded-lg bg-slate-50 p-3 text-sm">
+                        <p className="font-medium">
+                            {item.kind}: {item.label}
+                        </p>
+                        <p className="text-red-700">{item.message}</p>
+                        <p className="text-xs text-slate-500">{item.code}</p>
+                        <div className="mt-2 flex gap-2">
+                            <button
+                                type="button"
+                                aria-label={`Retry ${item.label}`}
+                                className={primaryButton}
+                                onClick={() => retryAttention(item)}
+                            >
+                                Retry
+                            </button>
+                            <button
+                                type="button"
+                                aria-label={`Dismiss ${item.label}`}
+                                className={secondaryButton}
+                                onClick={() => dismissAttention(item.id)}
+                            >
+                                Dismiss
+                            </button>
+                        </div>
+                    </li>
+                ))}
+            </ul>
+        </div>
+    )
+}
+
+function StockCheck({ api, waiting }) {
+    const [result, setResult] = useState(null)
+    const [error, setError] = useState('')
+    const [busy, setBusy] = useState(false)
+
+    async function handleCheck() {
+        setBusy(true)
+        setError('')
+        try {
+            setResult(await compareStock(api))
+        } catch (err) {
+            setResult(null)
+            setError(err?.message || 'The stock could not be compared')
+        } finally {
+            setBusy(false)
+        }
+    }
+
+    return (
+        <div className="space-y-2 rounded-xl bg-white p-4 text-sm shadow-sm">
+            <p className="font-semibold">Stock check</p>
+            <p className="text-slate-600">Compares the stock on this device with the server, item by item.</p>
+            {waiting > 0 && (
+                <p className="text-amber-700">
+                    {waiting} changes are still waiting to sync, so some differences are expected. Sync first.
+                </p>
+            )}
+            <button type="button" className={secondaryButton} disabled={busy} onClick={handleCheck}>
+                Compare stock with server
+            </button>
+            {error && (
+                <p role="alert" className="text-red-600">
+                    {error}
+                </p>
+            )}
+            {result && (
+                <div data-testid="stock-result" className="space-y-1">
+                    <p>{result.checked} items checked.</p>
+                    {result.mismatches.length === 0 ? (
+                        <p className="text-green-700">Stock matches the server.</p>
+                    ) : (
+                        <ul className="list-disc pl-5 text-red-700">
+                            {result.mismatches.map((m) => (
+                                <li key={m.variantId}>
+                                    {m.sku}: this device {m.local}, server {m.server === null ? 'does not have it' : m.server}
+                                </li>
+                            ))}
+                        </ul>
+                    )}
+                    {result.onlyOnServer.length > 0 && (
+                        <p className="text-slate-600">{result.onlyOnServer.length} items exist only on the server.</p>
+                    )}
+                </div>
+            )}
+        </div>
+    )
+}
+
+export default function SyncPage() {
+    const sync = useSync()
+    const { counts } = sync
+    const catalogue = counts.products + counts.variants
+
+    return (
+        <div className="space-y-4">
+            <h2 className="text-xl font-bold">Sync with server</h2>
+
+            <div className="space-y-1 rounded-xl bg-white p-4 text-sm shadow-sm">
+                <p>Connection: {sync.online ? 'Online' : 'Offline'}</p>
+                <p>
+                    Signed in:{' '}
+                    {sync.signedIn
+                        ? `${sync.session.user?.displayName ?? 'Yes'}${sync.session.user?.role ? ` (${sync.session.user.role})` : ''}`
+                        : 'No'}
+                </p>
+                <p>
+                    Waiting to sync: {catalogue} catalogue changes, {counts.movements} stock changes,{' '}
+                    {counts.sales} sales
+                </p>
+                <p>Needs attention: {counts.attention}</p>
+                <p>
+                    Last successful sync:{' '}
+                    {sync.lastSuccessAt ? formatDateTime(sync.lastSuccessAt) : 'Never'}
+                </p>
+                {sync.lastRun && (
+                    <p className="text-slate-500">
+                        Last attempt: {formatDateTime(sync.lastRun.at)}
+                        {sync.lastRun.message ? ` · ${sync.lastRun.message}` : ''}
+                    </p>
+                )}
+                {sync.notice && (
+                    <p role="status" className="text-amber-700">
+                        {sync.notice}
+                    </p>
+                )}
+                <div className="flex flex-wrap gap-2 pt-2">
+                    <button
+                        type="button"
+                        className={primaryButton}
+                        disabled={!sync.signedIn || sync.syncing}
+                        onClick={sync.syncNow}
+                    >
+                        {sync.syncing ? 'Syncing...' : 'Sync now'}
+                    </button>
+                    {sync.signedIn && (
+                        <button type="button" className={secondaryButton} onClick={sync.signOut}>
+                            Sign out
+                        </button>
+                    )}
+                </div>
+            </div>
+
+            <ClockNotice clock={sync.clock} />
+
+            {!sync.signedIn && <LoginForm signIn={sync.signIn} />}
+
+            <AttentionList />
+
+            {sync.signedIn && <StockCheck api={sync.api} waiting={counts.total} />}
+        </div>
+    )
+}
+
+=== client\src\pages\SyncPage.test.jsx ===
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { vi } from 'vitest'
+import { db } from '../db/db'
+import { seedSampleData } from '../db/sampleData'
+import { AuthError } from '../sync/apiClient'
+import { listAttention, recordAttention } from '../sync/attention'
+import { SyncContext } from '../sync/SyncProvider'
+import SyncPage from './SyncPage'
+
+const counts = (over = {}) => ({
+    products: 0,
+    variants: 0,
+    movements: 0,
+    sales: 0,
+    total: 0,
+    attention: 0,
+    ...over,
+})
+
+function renderPage(over = {}) {
+    const value = {
+        session: null,
+        signedIn: false,
+        online: true,
+        syncing: false,
+        counts: counts(),
+        lastRun: null,
+        lastSuccessAt: null,
+        clock: null,
+        notice: '',
+        api: {},
+        signIn: vi.fn(async () => ({})),
+        signOut: vi.fn(),
+        syncNow: vi.fn(),
+        ...over,
+    }
+    render(
+        <SyncContext.Provider value={value}>
+            <SyncPage />
+        </SyncContext.Provider>,
+    )
+    return value
+}
+
+beforeEach(async () => {
+    await Promise.all(db.tables.map((t) => t.clear()))
+})
+
+test('asks for a login when nobody is signed in, and shows why a sign-in failed', async () => {
+    const signIn = vi.fn(async () => {
+        throw new AuthError('Invalid username or password')
+    })
+    renderPage({ signIn })
+
+    fireEvent.change(screen.getByLabelText('Username'), { target: { value: ' owner ' } })
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'wrong-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+
+    expect(await screen.findByText('Invalid username or password')).toBeInTheDocument()
+    expect(signIn).toHaveBeenCalledWith('owner', 'wrong-password')
+    expect(screen.getByRole('button', { name: 'Sync now' })).toBeDisabled()
+})
+
+test('shows who is signed in and what is waiting, and syncs on request', () => {
+    const value = renderPage({
+        signedIn: true,
+        session: { token: 't', user: { displayName: 'Owner', role: 'admin' } },
+        counts: counts({ products: 1, variants: 2, movements: 3, sales: 4, total: 10 }),
+    })
+
+    expect(screen.getByText(/Owner \(admin\)/)).toBeInTheDocument()
+    expect(screen.getByText(/3 catalogue changes, 3 stock changes, 4 sales/)).toBeInTheDocument()
+    expect(screen.queryByLabelText('Username')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sync now' }))
+    expect(value.syncNow).toHaveBeenCalledTimes(1)
+})
+
+test('lists refused items with the reason, and Retry puts the sale back in the queue', async () => {
+    await db.sales.add({ id: 's1', invoiceNumber: 'INV-000001', syncStatus: 'review', createdAt: 'x' })
+    await recordAttention(
+        { kind: 'sale', entityId: 's1', entityTime: '2026-10-30T10:00:00.000Z', label: 'INV-000001' },
+        { code: 'UNKNOWN_VARIANT', message: 'Item does not exist' },
+    )
+    renderPage({ signedIn: true, session: { token: 't', user: {} } })
+
+    expect(await screen.findByText('Item does not exist')).toBeInTheDocument()
+    expect(screen.getByText('UNKNOWN_VARIANT')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry INV-000001' }))
+
+    await waitFor(async () => expect(await listAttention()).toHaveLength(0))
+    expect((await db.sales.get('s1')).syncStatus).toBe('pending')
+})
+
+test('the stock check lists the items that differ from the server', async () => {
+    await seedSampleData()
+    const variants = await db.variants.toArray()
+    const items = variants.map((v) => ({
+        variantId: v.id,
+        sku: v.sku,
+        currentStock: v.id === variants[0].id ? v.currentStock + 5 : v.currentStock,
+    }))
+    renderPage({
+        signedIn: true,
+        session: { token: 't', user: {} },
+        api: { stockLevels: async () => ({ items }) },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Compare stock with server' }))
+
+    const result = await screen.findByTestId('stock-result')
+    expect(result).toHaveTextContent('9 items checked')
+    expect(result).toHaveTextContent(
+        `${variants[0].sku}: this device ${variants[0].currentStock}, server ${variants[0].currentStock + 5}`,
+    )
+})
+
+=== client\src\sync\apiClient.test.js ===
+import { vi } from 'vitest'
+import { ApiError, AuthError, NetworkError, createApiClient } from './apiClient'
+
+const reply = (status, body) =>
+  vi.fn(async () => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => {
+      if (body === undefined) throw new Error('no body')
+      return body
+    },
+  }))
+
+test('sends JSON with the login token', async () => {
+  const fetchImpl = reply(200, { results: [] })
+  const api = createApiClient({
+    baseUrl: 'http://x/api',
+    getToken: () => 'tok',
+    fetchImpl,
+  })
+
+  const ops = [{ type: 'product.upsert', data: { id: 'p1' } }]
+  expect(await api.push(ops)).toEqual({ results: [] })
+
+  const [url, init] = fetchImpl.mock.calls[0]
+  expect(url).toBe('http://x/api/sync/push')
+  expect(init.method).toBe('POST')
+  expect(init.headers.Authorization).toBe('Bearer tok')
+  expect(JSON.parse(init.body)).toEqual({ ops })
+})
+
+test('login is sent without a token and returns the answer', async () => {
+  const fetchImpl = reply(200, { token: 't', user: { username: 'owner' } })
+  const api = createApiClient({ baseUrl: 'http://x/api', fetchImpl })
+
+  const result = await api.login('owner', 'secret')
+
+  expect(result.token).toBe('t')
+  const [url, init] = fetchImpl.mock.calls[0]
+  expect(url).toBe('http://x/api/auth/login')
+  expect(init.headers.Authorization).toBeUndefined()
+  expect(JSON.parse(init.body)).toEqual({
+    username: 'owner',
+    password: 'secret',
+  })
+})
+
+test('a server that cannot be reached becomes a NetworkError', async () => {
+  const fetchImpl = vi.fn(async () => {
+    throw new TypeError('Failed to fetch')
+  })
+  const api = createApiClient({ baseUrl: 'http://x/api', fetchImpl })
+
+  await expect(api.status()).rejects.toBeInstanceOf(NetworkError)
+})
+
+test('a server that does not answer in time becomes a NetworkError', async () => {
+  const fetchImpl = (url, init) =>
+    new Promise((resolve, reject) => {
+      init.signal.addEventListener('abort', () =>
+        reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+      )
+    })
+  const api = createApiClient({
+    baseUrl: 'http://x/api',
+    fetchImpl,
+    timeoutMs: 20,
+  })
+
+  await expect(api.status()).rejects.toMatchObject({
+    name: 'NetworkError',
+    message: expect.stringContaining('did not answer'),
+  })
+})
+
+test('HTTP 401 becomes an AuthError with the server message', async () => {
+  const fetchImpl = reply(401, {
+    error: { code: 'UNAUTHORIZED', message: 'Invalid username or password' },
+  })
+  const api = createApiClient({ baseUrl: 'http://x/api', fetchImpl })
+
+  const error = await api.login('a', 'b').catch((err) => err)
+  expect(error).toBeInstanceOf(AuthError)
+  expect(error.message).toBe('Invalid username or password')
+})
+
+test('other errors keep their status and code, even without a JSON body', async () => {
+  const refused = createApiClient({
+    baseUrl: 'http://x/api',
+    fetchImpl: reply(422, {
+      error: { code: 'SALE_NOT_ALLOWED', message: 'Not allowed', details: [1] },
+    }),
+  })
+  await expect(refused.status()).rejects.toMatchObject({
+    status: 422,
+    code: 'SALE_NOT_ALLOWED',
+    message: 'Not allowed',
+  })
+
+  const broken = createApiClient({
+    baseUrl: 'http://x/api',
+    fetchImpl: reply(502, undefined),
+  })
+  const error = await broken.status().catch((err) => err)
+  expect(error).toBeInstanceOf(ApiError)
+  expect(error).toMatchObject({ status: 502, code: 'HTTP_ERROR' })
+})
+
+
+=== client\src\sync\clock.test.js ===
+import { vi } from 'vitest'
+import { checkClock } from './clock'
+
+const SERVER = Date.parse('2026-11-05T10:00:00.000Z')
+
+function check(deviceOffsetMs) {
+  const device = SERVER + deviceOffsetMs
+  const now = vi.fn().mockReturnValueOnce(device).mockReturnValueOnce(device)
+  const api = {
+    status: async () => ({ serverTime: new Date(SERVER).toISOString() }),
+  }
+  return checkClock(api, now)
+}
+
+test('a clock that matches the server is fine', async () => {
+  const result = await check(30_000)
+  expect(result.ok).toBe(true)
+  expect(result.skewMs).toBe(30_000)
+})
+
+test('a clock that is minutes ahead or behind is flagged, and the direction is kept', async () => {
+  const ahead = await check(5 * 60_000)
+  expect(ahead.ok).toBe(false)
+  expect(ahead.skewMs).toBe(5 * 60_000)
+
+  const behind = await check(-7 * 60_000)
+  expect(behind.ok).toBe(false)
+  expect(behind.skewMs).toBe(-7 * 60_000)
+})
+
+
+=== client\src\sync\collect.test.js ===
+import { db } from '../db/db'
+import { seedSampleData } from '../db/sampleData'
+import { createSale } from '../db/saleRepo'
+import { adjustStock, updateVariant } from '../db/variantRepo'
+import { addItem, createCart, lineFromVariant } from '../billing/cart'
+import { newId } from '../lib/id'
+import { chunk, collectPending } from './collect'
+import { markVariantsSynced, setCursor } from './cursors'
+
+async function seedAndSell() {
+  await seedSampleData()
+  const variant = (await db.variants.toArray())[0]
+  const product = await db.products.get(variant.productId)
+  const cart = addItem(createCart(), lineFromVariant(variant, product)).cart
+  const { sale } = await createSale({ id: newId(), cart, payment: { method: 'cash' } })
+  return { sale, variant }
+}
+
+const ofKind = (ops, kind) => ops.filter((op) => op.kind === kind)
+
+beforeEach(async () => {
+  await Promise.all(db.tables.map((t) => t.clear()))
+})
+
+test('collects products, then items, then stock changes, then sales', async () => {
+  await seedAndSell()
+  const ops = await collectPending()
+  const kinds = ops.map((op) => op.kind)
+
+  expect(ofKind(ops, 'product')).toHaveLength(3)
+  expect(ofKind(ops, 'variant')).toHaveLength(9)
+  expect(ofKind(ops, 'movement')).toHaveLength(9)
+  expect(ofKind(ops, 'sale')).toHaveLength(1)
+
+  expect(kinds.lastIndexOf('product')).toBeLessThan(kinds.indexOf('variant'))
+  expect(kinds.lastIndexOf('variant')).toBeLessThan(kinds.indexOf('movement'))
+  expect(kinds.lastIndexOf('movement')).toBeLessThan(kinds.indexOf('sale'))
+})
+
+test('only collects what is after the cursor', async () => {
+  await seedSampleData()
+  const first = await collectPending()
+  await setCursor('product', ofKind(first, 'product').at(-1).key)
+  await setCursor('movement', ofKind(first, 'movement').at(-1).key)
+  await markVariantsSynced(ofKind(first, 'variant'))
+
+  expect(await collectPending()).toHaveLength(0)
+
+  await db.products.add({
+    id: 'zzz-new',
+    name: 'New Product',
+    category: 'Tees',
+    brand: '',
+    supplier: '',
+    status: 'active',
+    createdAt: '2099-01-01T00:00:00.000Z',
+    updatedAt: '2099-01-01T00:00:00.000Z',
+  })
+
+  const next = await collectPending()
+  expect(next.map((op) => op.entityId)).toEqual(['zzz-new'])
+})
+
+test('two products saved in the same millisecond are both collected, and the cursor can sit between them', async () => {
+  const at = '2026-10-30T10:00:00.000Z'
+  const base = { category: 'Shirts', brand: '', supplier: '', status: 'active', createdAt: at, updatedAt: at }
+  await db.products.bulkAdd([
+    { ...base, id: 'a1', name: 'First' },
+    { ...base, id: 'b2', name: 'Second' },
+  ])
+
+  const all = await collectPending()
+  expect(all.map((op) => op.entityId)).toEqual(['a1', 'b2'])
+
+  await setCursor('product', ofKind(all, 'product')[0].key)
+  expect((await collectPending()).map((op) => op.entityId)).toEqual(['b2'])
+})
+
+test('sale stock changes are not collected, but manual ones are', async () => {
+  const { variant } = await seedAndSell()
+  await adjustStock({ variantId: variant.id, quantityChange: -1, type: 'adjustment', reason: 'Damaged' })
+
+  const movements = ofKind(await collectPending(), 'movement')
+
+  expect(movements).toHaveLength(10) // 9 openings + 1 adjustment
+  expect(movements.some((op) => op.data.type === 'sale')).toBe(false)
+  expect(movements.some((op) => op.data.type === 'adjustment')).toBe(true)
+})
+
+test('only sales that are still pending are collected', async () => {
+  const { sale } = await seedAndSell()
+  const variant = (await db.variants.toArray())[1]
+  const product = await db.products.get(variant.productId)
+  const cart = addItem(createCart(), lineFromVariant(variant, product)).cart
+  const second = await createSale({ id: newId(), cart, payment: { method: 'cash' } })
+
+  await db.sales.update(sale.id, { syncStatus: 'synced' })
+
+  const sales = ofKind(await collectPending(), 'sale')
+  expect(sales.map((op) => op.entityId)).toEqual([second.sale.id])
+})
+
+
+test('a stock change does not make an item pending, but a price change does', async () => {
+  const { variant } = await seedAndSell()
+
+  await markVariantsSynced(ofKind(await collectPending(), 'variant'))
+  expect(ofKind(await collectPending(), 'variant')).toHaveLength(0)
+
+  await adjustStock({
+    variantId: variant.id,
+    quantityChange: -1,
+    type: 'adjustment',
+    reason: 'Damaged',
+  })
+
+  expect(ofKind(await collectPending(), 'variant')).toHaveLength(0)
+
+  // Choose a different price that respects the MRP validation rule.
+  const newSellingPricePaise =
+    variant.sellingPricePaise < variant.mrpPaise
+      ? variant.sellingPricePaise + 1
+      : variant.sellingPricePaise - 1
+
+  await updateVariant(variant.id, {
+    sellingPricePaise: newSellingPricePaise,
+  })
+
+  const pending = ofKind(await collectPending(), 'variant')
+  expect(pending.map((op) => op.entityId)).toEqual([variant.id])
+})
+
+
+test('splits operations into batches and keeps their order', () => {
+  expect(chunk([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]])
+  expect(chunk([], 3)).toEqual([])
+})
+
+=== client\src\sync\engine.test.js ===
+import { vi } from 'vitest'
+import { db } from '../db/db'
+import { seedSampleData } from '../db/sampleData'
+import { createSale } from '../db/saleRepo'
+import { adjustStock, updateVariant } from '../db/variantRepo'
+import { addItem, createCart, lineFromVariant } from '../billing/cart'
+import { newId } from '../lib/id'
+import { AuthError, NetworkError } from './apiClient'
+import { listAttention, retryAttention } from './attention'
+import { countPending } from './collect'
+import { runSync } from './engine'
+
+// The server's answer for each operation. `decide(op)` can return a status text,
+// or { status, code, message }, or nothing (meaning "applied").
+const answer = (ops, decide = () => undefined) => ({
+  results: ops.map((op, index) => {
+    const d = decide(op)
+    const detail = typeof d === 'string' ? { status: d } : (d ?? { status: 'applied' })
+    return { index, type: op.type, id: op.data.id, ...detail }
+  }),
+})
+
+const fakeApi = (handler = async (ops) => answer(ops)) => ({ push: vi.fn(handler) })
+const allOps = (api) => api.push.mock.calls.flatMap(([ops]) => ops)
+
+async function seedAndSell() {
+  await seedSampleData()
+  const variant = (await db.variants.toArray())[0]
+  const product = await db.products.get(variant.productId)
+  const cart = addItem(createCart(), lineFromVariant(variant, product)).cart
+  const { sale } = await createSale({ id: newId(), cart, payment: { method: 'cash' } })
+  return { sale, variant }
+}
+
+// 22 operations: 3 products, 9 items, 9 stock changes, 1 sale (batches of 20 and 2).
+const TOTAL_OPS = 22
+
+beforeEach(async () => {
+  await Promise.all(db.tables.map((t) => t.clear()))
+})
+
+test('sends products, items, stock changes and sales in order, and marks everything synced', async () => {
+  const { sale } = await seedAndSell()
+  const api = fakeApi()
+
+  const summary = await runSync({ api })
+
+  expect(summary).toMatchObject({ outcome: 'ok', sent: TOTAL_OPS, applied: TOTAL_OPS, remaining: 0 })
+  expect(api.push).toHaveBeenCalledTimes(2)
+
+  const types = allOps(api).map((op) => op.type)
+  expect(types.lastIndexOf('product.upsert')).toBeLessThan(types.indexOf('variant.upsert'))
+  expect(types.lastIndexOf('variant.upsert')).toBeLessThan(types.indexOf('stock.movement'))
+  expect(types.lastIndexOf('stock.movement')).toBeLessThan(types.indexOf('sale.create'))
+  expect(types.filter((t) => t === 'sale.create')).toHaveLength(1)
+
+  expect((await countPending()).total).toBe(0)
+  const saved = await db.sales.get(sale.id)
+  expect(saved.syncStatus).toBe('synced')
+  expect(saved.syncedAt).toBeTruthy()
+})
+
+test('a second run has nothing to send and does not call the server', async () => {
+  await seedAndSell()
+  const api = fakeApi()
+  await runSync({ api })
+  api.push.mockClear()
+
+  const summary = await runSync({ api })
+
+  expect(summary).toMatchObject({ outcome: 'ok', sent: 0 })
+  expect(api.push).not.toHaveBeenCalled()
+})
+
+test('when the server cannot be reached everything stays waiting', async () => {
+  await seedAndSell()
+  const api = fakeApi(async () => {
+    throw new NetworkError('Could not reach the server')
+  })
+
+  const summary = await runSync({ api })
+
+  expect(summary.outcome).toBe('offline')
+  expect(summary.message).toBe('Could not reach the server')
+  expect((await countPending()).total).toBe(TOTAL_OPS)
+})
+
+test('an expired login stops the run and keeps everything waiting', async () => {
+  await seedAndSell()
+  const api = fakeApi(async () => {
+    throw new AuthError('expired')
+  })
+
+  const summary = await runSync({ api })
+
+  expect(summary.outcome).toBe('auth')
+  expect((await countPending()).total).toBe(TOTAL_OPS)
+})
+
+test('a temporary server error keeps that batch waiting and does not lose earlier progress', async () => {
+  await seedAndSell()
+  const api = fakeApi(async (ops) =>
+    answer(ops, (op) => (op.type === 'sale.create' ? 'error' : undefined)),
+  )
+
+  const summary = await runSync({ api })
+
+  expect(summary.outcome).toBe('server-error')
+  const pending = await countPending()
+  expect(pending).toMatchObject({ products: 0, variants: 0, movements: 1, sales: 1 })
+})
+
+test('a refused sale goes to needs-attention, is kept on the device and is not sent again', async () => {
+  const { sale } = await seedAndSell()
+  const api = fakeApi(async (ops) =>
+    answer(ops, (op) =>
+      op.type === 'sale.create'
+        ? { status: 'rejected', code: 'UNKNOWN_VARIANT', message: 'Item does not exist' }
+        : undefined,
+    ),
+  )
+
+  const summary = await runSync({ api })
+
+  expect(summary).toMatchObject({ outcome: 'ok', rejected: 1 })
+  const saved = await db.sales.get(sale.id)
+  expect(saved.syncStatus).toBe('review')
+  expect(saved.syncMessage).toBe('Item does not exist')
+
+  const attention = await listAttention()
+  expect(attention).toHaveLength(1)
+  expect(attention[0]).toMatchObject({ kind: 'sale', entityId: sale.id, code: 'UNKNOWN_VARIANT' })
+
+  api.push.mockClear()
+  await runSync({ api })
+  expect(api.push).not.toHaveBeenCalled()
+  expect((await countPending()).attention).toBe(1)
+})
+
+test('a refused catalogue item is listed, and sending it again after fixing it clears the entry', async () => {
+  await seedSampleData()
+  let refusedId = null
+  const refusing = fakeApi(async (ops) =>
+    answer(ops, (op) => {
+      if (op.type === 'variant.upsert' && !refusedId) {
+        refusedId = op.data.id
+        return { status: 'rejected', code: 'DUPLICATE_BARCODE', message: 'Barcode already used' }
+      }
+      return undefined
+    }),
+  )
+
+  await runSync({ api: refusing })
+
+  const attention = await listAttention()
+  expect(attention).toHaveLength(1)
+  expect(attention[0]).toMatchObject({ kind: 'variant', entityId: refusedId })
+  expect((await countPending()).variants).toBe(0)
+
+  await updateVariant(refusedId, { sellingPricePaise: 1000 })
+  const accepting = fakeApi()
+  await runSync({ api: accepting })
+
+  expect(allOps(accepting).map((op) => op.data.id)).toEqual([refusedId])
+  expect(await listAttention()).toHaveLength(0)
+})
+
+test('things the server already has count as done', async () => {
+  const { sale } = await seedAndSell()
+  const api = fakeApi(async (ops) => answer(ops, () => 'duplicate'))
+
+  const summary = await runSync({ api })
+
+  expect(summary).toMatchObject({ outcome: 'ok', duplicate: TOTAL_OPS, applied: 0 })
+  expect((await db.sales.get(sale.id)).syncStatus).toBe('synced')
+})
+
+test('progress is kept when the connection drops part-way', async () => {
+  await seedAndSell()
+  let calls = 0
+  const api = fakeApi(async (ops) => {
+    calls += 1
+    if (calls === 2) throw new NetworkError('Could not reach the server')
+    return answer(ops)
+  })
+
+  const summary = await runSync({ api })
+
+  expect(summary.outcome).toBe('offline')
+  expect(summary.remaining).toBe(2)
+  const pending = await countPending()
+  expect(pending).toMatchObject({ products: 0, variants: 0, movements: 1, sales: 1 })
+})
+
+test('retrying a refused sale sends it again, and success clears it', async () => {
+  const { sale } = await seedAndSell()
+  const refusing = fakeApi(async (ops) =>
+    answer(ops, (op) =>
+      op.type === 'sale.create' ? { status: 'rejected', code: 'X', message: 'Not now' } : undefined,
+    ),
+  )
+  await runSync({ api: refusing })
+  const [item] = await listAttention()
+
+  await retryAttention(item)
+  expect((await db.sales.get(sale.id)).syncStatus).toBe('pending')
+  expect(await listAttention()).toHaveLength(0)
+
+  const accepting = fakeApi()
+  await runSync({ api: accepting })
+  expect((await db.sales.get(sale.id)).syncStatus).toBe('synced')
+  expect(allOps(accepting).map((op) => op.type)).toEqual(['sale.create'])
+})
+
+test('retrying refused products and items sends them again', async () => {
+  await seedSampleData()
+  const product = (await db.products.toArray())[0]
+  const variant = (await db.variants.toArray())[0]
+  const refusing = fakeApi(async (ops) =>
+    answer(ops, (op) =>
+      op.data.id === product.id || op.data.id === variant.id
+        ? { status: 'rejected', code: 'X', message: 'Refused' }
+        : undefined,
+    ),
+  )
+  await runSync({ api: refusing })
+  expect(await listAttention()).toHaveLength(2)
+
+  for (const item of await listAttention()) await retryAttention(item)
+
+  const accepting = fakeApi()
+  await runSync({ api: accepting })
+  const sentIds = allOps(accepting).map((op) => op.data.id)
+  expect(sentIds).toContain(product.id)
+  expect(sentIds).toContain(variant.id)
+  expect(await listAttention()).toHaveLength(0)
+})
+
+test('only one run happens at a time', async () => {
+  await seedAndSell()
+  const api = fakeApi(async (ops) => {
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    return answer(ops)
+  })
+
+  const first = runSync({ api })
+  const second = runSync({ api })
+
+  expect(first).toBe(second)
+  await Promise.all([first, second])
+  expect(api.push).toHaveBeenCalledTimes(2) // two batches, not four
+})
+
+test('manual stock changes are sent, sale stock changes are not', async () => {
+  const { variant } = await seedAndSell()
+  await adjustStock({ variantId: variant.id, quantityChange: -2, type: 'adjustment', reason: 'Damaged' })
+  const api = fakeApi()
+
+  await runSync({ api })
+
+  const movements = allOps(api).filter((op) => op.type === 'stock.movement')
+  expect(movements).toHaveLength(10)
+  expect(
+    movements.some((op) => op.data.type === 'adjustment' && op.data.quantityChange === -2),
+  ).toBe(true)
+  expect(movements.some((op) => op.data.type === 'sale')).toBe(false)
+})
+
+=== client\src\sync\ops.test.js ===
+import {
+  fingerprint,
+  movementOp,
+  productOp,
+  saleOp,
+  toRequestOp,
+  variantOp,
+} from './ops'
+
+const product = {
+  id: 'p1',
+  name: 'Cotton Shirt',
+  category: 'Shirts',
+  brand: undefined,
+  supplier: 'Pune Garments',
+  status: 'active',
+  createdAt: '2026-10-30T09:00:00.000Z',
+  updatedAt: '2026-10-30T10:00:00.000Z',
+  somethingElse: 'x',
+}
+
+const variant = {
+  id: 'v1',
+  productId: 'p1',
+  sku: 'SHIRT-M',
+  barcode: 'CLO000001',
+  size: 'M',
+  costPaise: 30000,
+  mrpPaise: 99900,
+  sellingPricePaise: 79900,
+  taxRatePercent: 5,
+  priceIncludesTax: true,
+  reorderThreshold: 3,
+  currentStock: 10,
+  status: 'active',
+  createdAt: '2026-10-30T09:00:00.000Z',
+  updatedAt: '2026-10-30T10:00:00.000Z',
+}
+
+test('a product operation carries only what the server accepts', () => {
+  const op = productOp(product)
+  expect(op.type).toBe('product.upsert')
+  expect(op.data).toEqual({
+    id: 'p1',
+    name: 'Cotton Shirt',
+    category: 'Shirts',
+    brand: '',
+    supplier: 'Pune Garments',
+    status: 'active',
+    discountAllowed: true,
+  })
+  expect(op).toMatchObject({
+    kind: 'product',
+    entityId: 'p1',
+    label: 'Cotton Shirt',
+    key: '2026-10-30T10:00:00.000Z|p1',
+  })
+})
+
+test('a product operation carries the discount setting, and older products count as allowing discounts', () => {
+  expect(
+    productOp({ ...product, discountAllowed: false }).data.discountAllowed,
+  ).toBe(false)
+  expect(
+    productOp({ ...product, discountAllowed: true }).data.discountAllowed,
+  ).toBe(true)
+  expect(productOp(product).data.discountAllowed).toBe(true)
+})
+
+test('an item operation never carries stock, and its fingerprint ignores stock changes', () => {
+  const a = variantOp(variant)
+  const stockOnly = variantOp({
+    ...variant,
+    currentStock: 3,
+    updatedAt: '2030-01-01T00:00:00.000Z',
+  })
+  const repriced = variantOp({ ...variant, sellingPricePaise: 70000 })
+
+  expect(a.data).not.toHaveProperty('currentStock')
+  expect(a.data).not.toHaveProperty('createdAt')
+  expect(a.data).toMatchObject({
+    id: 'v1',
+    productId: 'p1',
+    sku: 'SHIRT-M',
+    sellingPricePaise: 79900,
+  })
+  expect(stockOnly.fingerprint).toBe(a.fingerprint)
+  expect(repriced.fingerprint).not.toBe(a.fingerprint)
+  expect(fingerprint('same')).toBe(fingerprint('same'))
+})
+
+test('a stock operation keeps its own id and time, and a very long reason is shortened', () => {
+  const op = movementOp({
+    id: 'm1',
+    variantId: 'v1',
+    type: 'adjustment',
+    quantityChange: -2,
+    stockAfter: 8,
+    reason: 'x'.repeat(300),
+    referenceId: null,
+    createdAt: '2026-10-30T11:00:00.000Z',
+  })
+
+  expect(op.data).toMatchObject({
+    id: 'm1',
+    variantId: 'v1',
+    type: 'adjustment',
+    quantityChange: -2,
+    createdAt: '2026-10-30T11:00:00.000Z',
+  })
+  expect(op.data.reason).toHaveLength(200)
+  expect(op.data).not.toHaveProperty('stockAfter')
+  expect(op.label).toBe('Stock adjustment -2')
+})
+
+test('a cash sale operation lists lines in order with discounts, and sends only what the server recalculates from', () => {
+  const sale = {
+    id: 's1',
+    invoiceNumber: 'INV-000001',
+    createdAt: '2026-10-30T10:00:00.000Z',
+    billDiscount: { type: 'percent', value: 10 },
+    totalPaise: 71900,
+    payment: {
+      method: 'cash',
+      amountTenderedPaise: 80000,
+      changePaise: 8100,
+      reference: '',
+    },
+  }
+  const items = [
+    {
+      lineNumber: 2,
+      variantId: 'v2',
+      quantity: 1,
+      unitPricePaise: 129900,
+      discount: null,
+    },
+    {
+      lineNumber: 1,
+      variantId: 'v1',
+      quantity: 2,
+      unitPricePaise: 79900,
+      discount: { type: 'amount', value: 5000 },
+    },
+  ]
+
+  const op = saleOp(sale, items)
+
+  expect(op.type).toBe('sale.create')
+  expect(op.data).toEqual({
+    id: 's1',
+    invoiceNumber: 'INV-000001',
+    soldAt: '2026-10-30T10:00:00.000Z',
+    offline: true,
+    lines: [
+      {
+        variantId: 'v1',
+        quantity: 2,
+        unitPricePaise: 79900,
+        discount: { type: 'amount', value: 5000 },
+      },
+      { variantId: 'v2', quantity: 1, unitPricePaise: 129900 },
+    ],
+    billDiscount: { type: 'percent', value: 10 },
+    payment: { method: 'cash', amountTenderedPaise: 80000 },
+    claimedTotalPaise: 71900,
+  })
+})
+
+test('a line with discounts switched off is sent with a no-discount mark, and other lines are not', () => {
+  const sale = {
+    id: 's3',
+    invoiceNumber: 'INV-000003',
+    createdAt: '2026-10-30T10:00:00.000Z',
+    billDiscount: { type: 'percent', value: 10 },
+    totalPaise: 100000,
+    payment: {
+      method: 'cash',
+      amountTenderedPaise: 100000,
+      changePaise: 0,
+      reference: '',
+    },
+  }
+  const op = saleOp(sale, [
+    {
+      lineNumber: 1,
+      variantId: 'v1',
+      quantity: 1,
+      unitPricePaise: 79900,
+      discount: null,
+    },
+    {
+      lineNumber: 2,
+      variantId: 'v2',
+      quantity: 1,
+      unitPricePaise: 129900,
+      discount: null,
+      discountExcluded: true,
+    },
+  ])
+
+  expect(op.data.lines[0]).not.toHaveProperty('noDiscount')
+  expect(op.data.lines[1].noDiscount).toBe(true)
+})
+
+test('a UPI sale sends its reference but no cash amount, and no empty discount', () => {
+  const sale = {
+    id: 's2',
+    invoiceNumber: 'INV-000002',
+    createdAt: '2026-10-30T10:00:00.000Z',
+    billDiscount: null,
+    totalPaise: 79900,
+    payment: {
+      method: 'upi',
+      amountTenderedPaise: 79900,
+      changePaise: 0,
+      reference: 'UPI123',
+    },
+  }
+  const op = saleOp(sale, [
+    {
+      lineNumber: 1,
+      variantId: 'v1',
+      quantity: 1,
+      unitPricePaise: 79900,
+      discount: null,
+    },
+  ])
+
+  expect(op.data.payment).toEqual({ method: 'upi', reference: 'UPI123' })
+  expect(op.data).not.toHaveProperty('billDiscount')
+  expect(op.data.lines[0]).not.toHaveProperty('discount')
+})
+
+test('toRequestOp removes everything the server does not expect', () => {
+  const op = toRequestOp(productOp(product))
+  expect(Object.keys(op).sort()).toEqual(['data', 'type'])
+})
+
+
+=== client\src\sync\session.test.js ===
+import {
+  SESSION_KEY,
+  clearSession,
+  isExpired,
+  loadSession,
+  saveSession,
+  tokenExpiry,
+} from './session'
+
+const fakeJwt = (payload) => {
+  const encode = (value) =>
+    btoa(JSON.stringify(value))
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '')
+  return `${encode({ alg: 'HS256' })}.${encode(payload)}.signature`
+}
+
+beforeEach(() => {
+  localStorage.clear()
+})
+
+test('saves, loads and clears a session', () => {
+  expect(loadSession()).toBeNull()
+  expect(saveSession({ token: 'abc', user: { displayName: 'Owner' } })).toBe(
+    true,
+  )
+  expect(loadSession()).toMatchObject({
+    token: 'abc',
+    user: { displayName: 'Owner' },
+  })
+  clearSession()
+  expect(loadSession()).toBeNull()
+})
+
+test('ignores a damaged or empty stored session', () => {
+  localStorage.setItem(SESSION_KEY, '{not json')
+  expect(loadSession()).toBeNull()
+  localStorage.setItem(SESSION_KEY, JSON.stringify({ nothing: true }))
+  expect(loadSession()).toBeNull()
+})
+
+test('reads the expiry time from a login token', () => {
+  expect(tokenExpiry(fakeJwt({ exp: 2_000_000_000 }))).toBe(
+    2_000_000_000 * 1000,
+  )
+  expect(tokenExpiry('garbage')).toBeNull()
+  expect(tokenExpiry(fakeJwt({}))).toBeNull()
+})
+
+test('knows when a session has expired', () => {
+  const now = Date.parse('2026-11-05T10:00:00Z')
+  const seconds = now / 1000
+  expect(isExpired({ token: fakeJwt({ exp: seconds - 10 }) }, now)).toBe(true)
+  expect(isExpired({ token: fakeJwt({ exp: seconds + 3600 }) }, now)).toBe(
+    false,
+  )
+  expect(isExpired({ token: 'no-expiry-inside' }, now)).toBe(false)
+})
+
+
+=== client\src\sync\stockCheck.test.js ===
+import { db } from '../db/db'
+import { seedSampleData } from '../db/sampleData'
+import { compareStock } from './stockCheck'
+
+const serverLevels = async (change) => {
+  const variants = await db.variants.toArray()
+  const items = variants.map((v) => ({
+    variantId: v.id,
+    sku: v.sku,
+    currentStock: v.currentStock,
+    status: v.status,
+  }))
+  return change ? change(items) : items
+}
+
+const apiWith = (items) => ({ stockLevels: async () => ({ items }) })
+
+beforeEach(async () => {
+  await Promise.all(db.tables.map((t) => t.clear()))
+  await seedSampleData()
+})
+
+test('reports nothing when the stock matches', async () => {
+  const result = await compareStock(apiWith(await serverLevels()))
+  expect(result.checked).toBe(9)
+  expect(result.mismatches).toEqual([])
+  expect(result.onlyOnServer).toEqual([])
+})
+
+test('lists items whose stock differs, and items the server does not have', async () => {
+  const items = await serverLevels()
+  const different = items[0]
+  const missing = items[1]
+  const levels = items
+    .filter((item) => item.variantId !== missing.variantId)
+    .map((item) =>
+      item.variantId === different.variantId ? { ...item, currentStock: item.currentStock + 5 } : item,
+    )
+
+  const result = await compareStock(apiWith(levels))
+
+  expect(result.mismatches).toHaveLength(2)
+  expect(result.mismatches).toContainEqual({
+    variantId: different.variantId,
+    sku: different.sku,
+    local: different.currentStock,
+    server: different.currentStock + 5,
+  })
+  expect(result.mismatches).toContainEqual({
+    variantId: missing.variantId,
+    sku: missing.sku,
+    local: missing.currentStock,
+    server: null,
+  })
+})
+
+test('lists items that exist only on the server', async () => {
+  const items = await serverLevels((list) => [
+    ...list,
+    { variantId: 'server-only', sku: 'ONLY-1', currentStock: 4, status: 'active' },
+  ])
+
+  const result = await compareStock(apiWith(items))
+
+  expect(result.mismatches).toEqual([])
+  expect(result.onlyOnServer).toEqual([{ variantId: 'server-only', sku: 'ONLY-1', server: 4 }])
+})
+
+=== client\src\sync\SyncProvider.test.jsx ===
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { vi } from 'vitest'
+import { db } from '../db/db'
+import { seedSampleData } from '../db/sampleData'
+import { createSale } from '../db/saleRepo'
+import { addItem, createCart, lineFromVariant } from '../billing/cart'
+import { newId } from '../lib/id'
+import { AuthError, NetworkError } from './apiClient'
+import { SESSION_KEY, loadSession, saveSession } from './session'
+import SyncProvider, { useSync } from './SyncProvider'
+
+const answerAll = async ({ ops }) => answer(ops)
+const answer = (ops) => ({
+  results: ops.map((op, index) => ({ index, type: op.type, id: op.data.id, status: 'applied' })),
+})
+
+function makeApi(over = {}) {
+  return {
+    login: vi.fn(async () => ({ token: 'tok', user: { displayName: 'Owner', role: 'admin' } })),
+    push: vi.fn(async (ops) => answer(ops)),
+    status: vi.fn(async () => ({ serverTime: new Date().toISOString() })),
+    stockLevels: vi.fn(async () => ({ items: [] })),
+    ...over,
+  }
+}
+
+function Consumer() {
+  const sync = useSync()
+  return (
+    <div>
+      <p data-testid="signed-in">{String(sync.signedIn)}</p>
+      <p data-testid="notice">{sync.notice}</p>
+      <button type="button" onClick={() => sync.signIn('owner', 'pw')}>
+        Sign in
+      </button>
+      <button type="button" onClick={() => sync.syncNow()}>
+        Sync now
+      </button>
+    </div>
+  )
+}
+
+async function seedAndSell() {
+  await seedSampleData()
+  const variant = (await db.variants.toArray())[0]
+  const product = await db.products.get(variant.productId)
+  const cart = addItem(createCart(), lineFromVariant(variant, product)).cart
+  await createSale({ id: newId(), cart, payment: { method: 'cash' } })
+}
+
+function renderProvider(api) {
+  return render(
+    <SyncProvider api={api} autoDelayMs={10} intervalMs={30}>
+      <Consumer />
+    </SyncProvider>,
+  )
+}
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+beforeEach(async () => {
+  await Promise.all(db.tables.map((t) => t.clear()))
+  localStorage.clear()
+})
+
+test('syncs waiting work on its own when signed in', async () => {
+  saveSession({ token: 'tok', user: {} })
+  await seedAndSell()
+  const api = makeApi()
+
+  renderProvider(api)
+
+  await waitFor(() => expect(api.push).toHaveBeenCalled())
+  await waitFor(async () => {
+    expect((await db.sales.toArray())[0].syncStatus).toBe('synced')
+  })
+})
+
+test('does nothing when nobody is signed in', async () => {
+  await seedAndSell()
+  const api = makeApi()
+
+  renderProvider(api)
+  await wait(150)
+
+  expect(api.push).not.toHaveBeenCalled()
+})
+
+test('signing in keeps the session and starts syncing', async () => {
+  await seedAndSell()
+  const api = makeApi()
+
+  renderProvider(api)
+  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+
+  await waitFor(() => expect(loadSession()?.token).toBe('tok'))
+  await waitFor(() => expect(api.push).toHaveBeenCalled())
+  expect(screen.getByTestId('signed-in')).toHaveTextContent('true')
+})
+
+test('an expired login ends the session and asks for a new sign-in', async () => {
+  saveSession({ token: 'tok', user: {} })
+  await seedAndSell()
+  const api = makeApi({
+    push: vi.fn(async () => {
+      throw new AuthError('expired')
+    }),
+  })
+
+  renderProvider(api)
+
+  await waitFor(() => expect(screen.getByTestId('signed-in')).toHaveTextContent('false'))
+  expect(localStorage.getItem(SESSION_KEY)).toBeNull()
+  expect(screen.getByTestId('notice')).toHaveTextContent(/sign in/i)
+})
+
+test('after a failure it waits before trying again by itself, but Sync now tries at once', async () => {
+  saveSession({ token: 'tok', user: {} })
+  await seedAndSell()
+  const api = makeApi({
+    push: vi.fn(async () => {
+      throw new NetworkError('Could not reach the server')
+    }),
+  })
+
+  renderProvider(api)
+  await waitFor(() => expect(api.push).toHaveBeenCalledTimes(1))
+
+  await wait(150) // the automatic check runs every 30 ms, but the back-off holds it back
+  expect(api.push).toHaveBeenCalledTimes(1)
+
+  fireEvent.click(screen.getByRole('button', { name: 'Sync now' }))
+  await waitFor(() => expect(api.push).toHaveBeenCalledTimes(2))
+})
+

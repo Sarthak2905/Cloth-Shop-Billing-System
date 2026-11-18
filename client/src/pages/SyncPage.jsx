@@ -13,6 +13,13 @@ import { CLOCK_WARNING_MS } from '../sync/clock'
 import { compareStock } from '../sync/stockCheck'
 import { useSync } from '../sync/SyncProvider'
 
+const KIND_LABEL = {
+    sale: 'Bill',
+    variant: 'Item',
+    product: 'Product',
+    movement: 'Stock change',
+}
+
 function LoginForm({ signIn }) {
     const [username, setUsername] = useState('')
     const [password, setPassword] = useState('')
@@ -71,6 +78,44 @@ function LoginForm({ signIn }) {
     )
 }
 
+// Shown once, before anything has ever been sent: the first sync is a deliberate step.
+function FirstSyncCard({ counts, onStart, busy }) {
+    const [backedUp, setBackedUp] = useState(false)
+
+    return (
+        <div data-testid="first-sync" className="space-y-3 rounded-xl border-l-4 border-blue-500 bg-white p-4 shadow-sm">
+            <p className="font-semibold">First sync</p>
+            <p className="text-sm text-slate-600">
+                Nothing has been sent to the server yet. The first sync sends everything on this device:
+            </p>
+            <ul className="list-disc pl-5 text-sm">
+                <li>
+                    {counts.products} products and {counts.variants} items
+                </li>
+                <li>{counts.movements} stock records</li>
+                <li>{counts.sales} bills</li>
+            </ul>
+            <p className="text-sm text-slate-600">
+                It sends copies. Nothing on this device is changed or deleted, and it is safe to repeat. If the
+                server refuses something, it is listed under &quot;Needs attention&quot;. After the first sync
+                works, syncing runs by itself.
+            </p>
+            <label className="flex items-start gap-2 text-sm">
+                <input
+                    type="checkbox"
+                    className="mt-1"
+                    checked={backedUp}
+                    onChange={(e) => setBackedUp(e.target.checked)}
+                />
+                I have made a backup (use the Backup page in the menu)
+            </label>
+            <button type="button" className={primaryButton} disabled={!backedUp || busy} onClick={onStart}>
+                Start first sync
+            </button>
+        </div>
+    )
+}
+
 function ClockNotice({ clock }) {
     if (!clock) return null
     if (clock.ok) return <p className="text-sm text-slate-500">Clock check: this device&apos;s time matches the server.</p>
@@ -106,7 +151,9 @@ function AttentionList() {
                 {items.map((item) => (
                     <li key={item.id} data-testid="attention-item" className="rounded-lg bg-slate-50 p-3 text-sm">
                         <p className="font-medium">
-                            {item.kind}: {item.label}
+                            {item.kind === 'salepay' || item.kind === 'salecancel'
+                                ? item.label
+                                : `${KIND_LABEL[item.kind] ?? item.kind}: ${item.label}`}
                         </p>
                         <p className="text-red-700">{item.message}</p>
                         <p className="text-xs text-slate-500">{item.code}</p>
@@ -197,6 +244,7 @@ export default function SyncPage() {
     const sync = useSync()
     const { counts } = sync
     const catalogue = counts.products + counts.variants
+    const firstSync = sync.signedIn && !sync.lastSuccessAt && counts.total > 0
 
     return (
         <div className="space-y-4">
@@ -212,7 +260,7 @@ export default function SyncPage() {
                 </p>
                 <p>
                     Waiting to sync: {catalogue} catalogue changes, {counts.movements} stock changes,{' '}
-                    {counts.sales} sales
+                    {counts.sales} sales, {counts.payments ?? 0} payments, {counts.cancels ?? 0} cancellations
                 </p>
                 <p>Needs attention: {counts.attention}</p>
                 <p>
@@ -246,6 +294,8 @@ export default function SyncPage() {
                     )}
                 </div>
             </div>
+
+            {firstSync && <FirstSyncCard counts={counts} busy={sync.syncing} onStart={sync.syncNow} />}
 
             <ClockNotice clock={sync.clock} />
 

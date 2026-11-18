@@ -109,6 +109,7 @@ export async function correctSale({ oldSaleId, newSaleId, reason, cart, payment 
         cancelReason: why,
         replacedBySaleId: newSaleId,
         replacedByInvoice: created.sale.invoiceNumber,
+        cancelPending: 1, // the server still has to be told
       })
       await db.sales.update(newSaleId, {
         replacesSaleId: oldSaleId,

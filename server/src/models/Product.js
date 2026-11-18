@@ -5,9 +5,11 @@ const productSchema = new mongoose.Schema(
   {
     _id: { type: String, default: () => randomUUID() },
     name: { type: String, required: true, trim: true, maxlength: 120 },
-    category: { type: String, required: true, trim: true, maxlength: 60 },
+    category: { type: String, default: "", trim: true, maxlength: 60 },
     brand: { type: String, default: "", trim: true, maxlength: 60 },
     supplier: { type: String, default: "", trim: true, maxlength: 120 },
+    // false = this product never takes a bill discount
+    discountAllowed: { type: Boolean, default: true },
     status: {
       type: String,
       enum: ["active", "archived"],
@@ -29,6 +31,7 @@ export function publicProduct(product) {
     category: product.category,
     brand: product.brand,
     supplier: product.supplier,
+    discountAllowed: product.discountAllowed !== false,
     status: product.status,
     createdAt: product.createdAt,
     updatedAt: product.updatedAt,

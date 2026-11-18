@@ -74,11 +74,13 @@ export function productsRouter(config) {
       let product;
       try {
         product = await Product.create({
+          // the id the app already made, so both sides know the same product
           ...(data.id ? { _id: data.id } : {}),
           name: data.name,
-          category: data.category,
+          category: data.category ?? "",
           brand: data.brand ?? "",
           supplier: data.supplier ?? "",
+          discountAllowed: data.discountAllowed ?? true,
         });
       } catch (err) {
         throw translateDuplicate(err);
@@ -166,6 +168,8 @@ export function productsRouter(config) {
     }),
   );
 
+  // A stock entry. The same product and size can be entered any number of times; only the
+  // barcode must be unique. The SKU, cost and MRP are optional.
   router.post(
     "/:productId/variants",
     adminOnly,
@@ -189,11 +193,13 @@ export function productsRouter(config) {
               {
                 ...(data.id ? { _id: data.id } : {}),
                 productId: product._id,
-                sku: data.sku,
+                sku: data.sku || data.barcode,
                 barcode: data.barcode,
-                size: data.size,
-                costPaise: data.costPaise,
-                mrpPaise: data.mrpPaise,
+                size: data.size ?? "",
+                unit: data.unit ?? "piece",
+                ...(data.packSize ? { packSize: data.packSize } : {}),
+                costPaise: data.costPaise ?? 0,
+                mrpPaise: data.mrpPaise ?? data.sellingPricePaise,
                 sellingPricePaise: data.sellingPricePaise,
                 taxRatePercent: data.taxRatePercent ?? 0,
                 priceIncludesTax: data.priceIncludesTax ?? true,

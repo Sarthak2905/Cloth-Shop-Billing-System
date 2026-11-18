@@ -1,8 +1,39 @@
 import { db } from '../db/db'
 import { getCursor, getVariantHashes } from './cursors'
-import { movementOp, productOp, saleOp, variantOp } from './ops'
+import {
+  movementOp,
+  productOp,
+  saleCancelOp,
+  saleOp,
+  salePaymentOp,
+  variantOp,
+} from './ops'
 
 const byKey = (a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)
+
+const saleKey = (sale) => `${sale.createdAt}|${sale.id}`
+const bySaleKey = (a, b) => {
+  const x = saleKey(a)
+  const y = saleKey(b)
+  return x < y ? -1 : x > y ? 1 : 0
+}
+
+// Bills already on the server whose payment was recorded or changed afterwards.
+// (A bill that is not on the server yet carries its payment inside its own operation.)
+const paymentSales = () =>
+  db.sales
+    .where('paymentPending')
+    .equals(1)
+    .filter((sale) => sale.syncStatus === 'synced')
+
+// Bills already on the server that were cancelled afterwards.
+const cancelledSales = () =>
+  db.sales
+    .where('cancelPending')
+    .equals(1)
+    .filter(
+      (sale) => sale.syncStatus === 'synced' && sale.status === 'cancelled',
+    )
 
 async function pendingCatalogAndStock() {
   const productCursor = await getCursor('product')
@@ -31,23 +62,35 @@ async function pendingCatalogAndStock() {
 }
 
 // Everything waiting to be sent, in the order the server needs it:
-// products, then items, then stock changes, then sales. Oldest first within each.
+// products, then items, then stock changes, then new bills, then payments recorded
+// later, then cancellations. Oldest first within each.
 export async function collectPending() {
   const { products, variants, movements } = await pendingCatalogAndStock()
 
-  const sales = await db.sales.where('syncStatus').equals('pending').toArray()
-  const saleKey = (sale) => `${sale.createdAt}|${sale.id}`
-  sales.sort((a, b) =>
-    saleKey(a) < saleKey(b) ? -1 : saleKey(a) > saleKey(b) ? 1 : 0,
-  )
-
+  const sales = (
+    await db.sales.where('syncStatus').equals('pending').toArray()
+  ).sort(bySaleKey)
   const saleOps = []
   for (const sale of sales) {
     const items = await db.saleItems.where('saleId').equals(sale.id).toArray()
     saleOps.push(saleOp(sale, items))
   }
 
-  return [...products, ...variants, ...movements, ...saleOps]
+  const paymentOps = (await paymentSales().toArray())
+    .sort(bySaleKey)
+    .map(salePaymentOp)
+  const cancelOps = (await cancelledSales().toArray())
+    .sort(bySaleKey)
+    .map(saleCancelOp)
+
+  return [
+    ...products,
+    ...variants,
+    ...movements,
+    ...saleOps,
+    ...paymentOps,
+    ...cancelOps,
+  ]
 }
 
 export function chunk(list, size) {
@@ -60,13 +103,23 @@ export function chunk(list, size) {
 export async function countPending() {
   const { products, variants, movements } = await pendingCatalogAndStock()
   const sales = await db.sales.where('syncStatus').equals('pending').count()
+  const payments = await paymentSales().count()
+  const cancels = await cancelledSales().count()
   const attention = await db.syncQueue.where('status').equals('open').count()
   return {
     products: products.length,
     variants: variants.length,
     movements: movements.length,
     sales,
-    total: products.length + variants.length + movements.length + sales,
+    payments,
+    cancels,
+    total:
+      products.length +
+      variants.length +
+      movements.length +
+      sales +
+      payments +
+      cancels,
     attention,
   }
 }
