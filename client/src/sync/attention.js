@@ -1,5 +1,5 @@
 import { db } from '../db/db'
-import { forgetVariantHash, rewindCursor } from './cursors'
+import { forgetProductHash, forgetVariantHash, rewindCursor } from './cursors'
 
 // The "needs attention" list: things the server refused for a reason that retrying
 // will not fix. They are kept here, and are never deleted from the device.
@@ -48,6 +48,8 @@ export async function retryAttention(item) {
     await db.sales.update(item.entityId, { paymentPending: 1 })
   } else if (item.kind === 'salecancel') {
     await db.sales.update(item.entityId, { cancelPending: 1 })
+  } else if (item.kind === 'product') {
+    await forgetProductHash(item.entityId)
   } else if (item.kind === 'variant') {
     await forgetVariantHash(item.entityId)
   } else {

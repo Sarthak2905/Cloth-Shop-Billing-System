@@ -34,6 +34,17 @@ export function productOp(product) {
     entityTime: product.updatedAt,
     key: `${product.updatedAt}|${product.id}`,
     label: product.name,
+    // a short fingerprint of what the server knows about a product: it changes when it is edited
+    fingerprint: fingerprint(
+      JSON.stringify([
+        product.name,
+        product.category ?? '',
+        product.brand ?? '',
+        product.supplier ?? '',
+        product.status,
+        product.discountAllowed !== false,
+      ]),
+    ),
   }
 }
 

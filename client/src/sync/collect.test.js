@@ -5,14 +5,18 @@ import { adjustStock, updateVariant } from '../db/variantRepo'
 import { addItem, createCart, lineFromVariant } from '../billing/cart'
 import { newId } from '../lib/id'
 import { chunk, collectPending } from './collect'
-import { markVariantsSynced, setCursor } from './cursors'
+import { markProductsSynced, markVariantsSynced, setCursor } from './cursors'
 
 async function seedAndSell() {
   await seedSampleData()
   const variant = (await db.variants.toArray())[0]
   const product = await db.products.get(variant.productId)
   const cart = addItem(createCart(), lineFromVariant(variant, product)).cart
-  const { sale } = await createSale({ id: newId(), cart, payment: { method: 'cash' } })
+  const { sale } = await createSale({
+    id: newId(),
+    cart,
+    payment: { method: 'cash' },
+  })
   return { sale, variant }
 }
 
@@ -37,10 +41,10 @@ test('collects products, then items, then stock changes, then sales', async () =
   expect(kinds.lastIndexOf('movement')).toBeLessThan(kinds.indexOf('sale'))
 })
 
-test('only collects what is after the cursor', async () => {
+test('only collects what has not been sent yet', async () => {
   await seedSampleData()
   const first = await collectPending()
-  await setCursor('product', ofKind(first, 'product').at(-1).key)
+  await markProductsSynced(ofKind(first, 'product'))
   await setCursor('movement', ofKind(first, 'movement').at(-1).key)
   await markVariantsSynced(ofKind(first, 'variant'))
 
@@ -61,9 +65,16 @@ test('only collects what is after the cursor', async () => {
   expect(next.map((op) => op.entityId)).toEqual(['zzz-new'])
 })
 
-test('two products saved in the same millisecond are both collected, and the cursor can sit between them', async () => {
+test('products are told apart by their content, not by their time', async () => {
   const at = '2026-10-30T10:00:00.000Z'
-  const base = { category: 'Shirts', brand: '', supplier: '', status: 'active', createdAt: at, updatedAt: at }
+  const base = {
+    category: 'Shirts',
+    brand: '',
+    supplier: '',
+    status: 'active',
+    createdAt: at,
+    updatedAt: at,
+  }
   await db.products.bulkAdd([
     { ...base, id: 'a1', name: 'First' },
     { ...base, id: 'b2', name: 'Second' },
@@ -72,13 +83,55 @@ test('two products saved in the same millisecond are both collected, and the cur
   const all = await collectPending()
   expect(all.map((op) => op.entityId)).toEqual(['a1', 'b2'])
 
-  await setCursor('product', ofKind(all, 'product')[0].key)
+  await markProductsSynced([ofKind(all, 'product')[0]])
   expect((await collectPending()).map((op) => op.entityId)).toEqual(['b2'])
+
+  // an edit makes the product pending again, even though its time did not move
+  await db.products.update('a1', { name: 'First, edited' })
+  expect((await collectPending()).map((op) => op.entityId)).toEqual([
+    'a1',
+    'b2',
+  ])
+})
+
+test('a device that synced before fingerprints existed keeps what its old cursor said was sent', async () => {
+  const base = { category: 'Shirts', brand: '', supplier: '', status: 'active' }
+  await db.products.bulkAdd([
+    {
+      ...base,
+      id: 'old',
+      name: 'Old',
+      createdAt: '2026-10-01T00:00:00.000Z',
+      updatedAt: '2026-10-01T00:00:00.000Z',
+    },
+    {
+      ...base,
+      id: 'new',
+      name: 'New',
+      createdAt: '2026-11-01T00:00:00.000Z',
+      updatedAt: '2026-11-01T00:00:00.000Z',
+    },
+  ])
+  await setCursor('product', '2026-10-15T00:00:00.000Z|zzz')
+
+  expect((await collectPending()).map((op) => op.entityId)).toEqual(['new'])
+
+  // the first time something is marked, the old state is carried over: 'old' stays sent
+  const [newOp] = await collectPending()
+  await markProductsSynced([newOp])
+  expect(await collectPending()).toHaveLength(0)
+  await db.products.update('old', { name: 'Old, edited' })
+  expect((await collectPending()).map((op) => op.entityId)).toEqual(['old'])
 })
 
 test('sale stock changes are not collected, but manual ones are', async () => {
   const { variant } = await seedAndSell()
-  await adjustStock({ variantId: variant.id, quantityChange: -1, type: 'adjustment', reason: 'Damaged' })
+  await adjustStock({
+    variantId: variant.id,
+    quantityChange: -1,
+    type: 'adjustment',
+    reason: 'Damaged',
+  })
 
   const movements = ofKind(await collectPending(), 'movement')
 
@@ -87,19 +140,33 @@ test('sale stock changes are not collected, but manual ones are', async () => {
   expect(movements.some((op) => op.data.type === 'adjustment')).toBe(true)
 })
 
+test('a stock change the server already has is not collected', async () => {
+  await seedSampleData()
+  const [first] = await db.stockMovements.toArray()
+  await db.stockMovements.update(first.id, { synced: 1 })
+
+  const movements = ofKind(await collectPending(), 'movement')
+
+  expect(movements).toHaveLength(8)
+  expect(movements.map((op) => op.entityId)).not.toContain(first.id)
+})
+
 test('only sales that are still pending are collected', async () => {
   const { sale } = await seedAndSell()
   const variant = (await db.variants.toArray())[1]
   const product = await db.products.get(variant.productId)
   const cart = addItem(createCart(), lineFromVariant(variant, product)).cart
-  const second = await createSale({ id: newId(), cart, payment: { method: 'cash' } })
+  const second = await createSale({
+    id: newId(),
+    cart,
+    payment: { method: 'cash' },
+  })
 
   await db.sales.update(sale.id, { syncStatus: 'synced' })
 
   const sales = ofKind(await collectPending(), 'sale')
   expect(sales.map((op) => op.entityId)).toEqual([second.sale.id])
 })
-
 
 test('a stock change does not make an item pending, but a price change does', async () => {
   const { variant } = await seedAndSell()
@@ -129,7 +196,6 @@ test('a stock change does not make an item pending, but a price change does', as
   const pending = ofKind(await collectPending(), 'variant')
   expect(pending.map((op) => op.entityId)).toEqual([variant.id])
 })
-
 
 test('splits operations into batches and keeps their order', () => {
   expect(chunk([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]])

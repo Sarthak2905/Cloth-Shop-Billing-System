@@ -2,15 +2,18 @@ import { db } from '../db/db'
 import { AuthError, NetworkError } from './apiClient'
 import { clearAttention, recordAttention } from './attention'
 import { chunk, collectPending, countPending } from './collect'
-import { markVariantsSynced, setCursor } from './cursors'
+import { markProductsSynced, markVariantsSynced, setCursor } from './cursors'
 import { toRequestOp } from './ops'
+import { pullAll, pullIsDue } from './pull'
 
 const BATCH_SIZE = 20
+const PULL_EVERY_MS = 2 * 60 * 1000
 
 let running = null
 
-// Sends everything that is waiting. Only one run happens at a time: a second call
-// while one is running simply waits for, and returns, the same run.
+// Sends everything that is waiting, and then (with `pull`) downloads what changed on the
+// server. Only one run happens at a time: a second call while one is running simply waits
+// for, and returns, the same run.
 //
 // outcome: 'ok' | 'offline' | 'auth' | 'server-error'
 export function runSync(options) {
@@ -21,7 +24,26 @@ export function runSync(options) {
   return running
 }
 
-async function doSync({ api, batchSize = BATCH_SIZE }) {
+function failure(err) {
+  if (err instanceof NetworkError)
+    return { outcome: 'offline', message: err.message }
+  if (err instanceof AuthError) {
+    return { outcome: 'auth', message: 'Your sign-in is no longer valid.' }
+  }
+  return {
+    outcome: 'server-error',
+    message: err?.message ?? 'The server returned an error.',
+  }
+}
+
+async function doSync({
+  api,
+  batchSize = BATCH_SIZE,
+  pull = false,
+  forcePull = false,
+  pullIntervalMs = PULL_EVERY_MS,
+  onProgress,
+}) {
   const summary = {
     outcome: 'ok',
     sent: 0,
@@ -31,6 +53,7 @@ async function doSync({ api, batchSize = BATCH_SIZE }) {
     error: 0,
     remaining: 0,
     message: '',
+    pulled: null,
   }
 
   const ops = await collectPending()
@@ -40,16 +63,7 @@ async function doSync({ api, batchSize = BATCH_SIZE }) {
     try {
       response = await api.push(batch.map(toRequestOp))
     } catch (err) {
-      if (err instanceof NetworkError) {
-        summary.outcome = 'offline'
-        summary.message = err.message
-      } else if (err instanceof AuthError) {
-        summary.outcome = 'auth'
-        summary.message = 'Your sign-in is no longer valid.'
-      } else {
-        summary.outcome = 'server-error'
-        summary.message = err?.message ?? 'The server returned an error.'
-      }
+      Object.assign(summary, failure(err))
       break
     }
 
@@ -70,6 +84,17 @@ async function doSync({ api, batchSize = BATCH_SIZE }) {
     }
   }
 
+  // Downloading comes only after everything was sent without trouble.
+  if (pull && summary.outcome === 'ok' && typeof api.pullPage === 'function') {
+    if (forcePull || (await pullIsDue(pullIntervalMs))) {
+      try {
+        summary.pulled = await pullAll({ api, onProgress })
+      } catch (err) {
+        Object.assign(summary, failure(err))
+      }
+    }
+  }
+
   summary.remaining = (await countPending()).total
   await saveLastRun(summary)
   return summary
@@ -86,6 +111,8 @@ async function paymentIsCurrent(saleId, sentRev) {
 // hit a temporary error (those are tried again later).
 async function applyBatchResults(batch, results, summary) {
   let temporary = false
+  const acceptedMovements = []
+  const refusedMovements = []
 
   for (let i = 0; i < batch.length; i += 1) {
     const op = batch[i]
@@ -111,6 +138,8 @@ async function applyBatchResults(batch, results, summary) {
         }
       } else if (op.kind === 'salecancel') {
         await db.sales.update(op.entityId, { cancelPending: undefined })
+      } else if (op.kind === 'movement') {
+        acceptedMovements.push(op.entityId)
       }
       await clearAttention(op)
     } else if (result?.status === 'rejected') {
@@ -125,6 +154,8 @@ async function applyBatchResults(batch, results, summary) {
         await db.sales.update(op.entityId, { paymentPending: undefined })
       } else if (op.kind === 'salecancel') {
         await db.sales.update(op.entityId, { cancelPending: undefined })
+      } else if (op.kind === 'movement') {
+        refusedMovements.push(op.entityId)
       }
     } else {
       summary.error += 1
@@ -134,17 +165,34 @@ async function applyBatchResults(batch, results, summary) {
 
   // Only move forward when the whole batch is settled. Otherwise the batch is sent
   // again next time, which is safe because the server ignores what it already has.
-  if (!temporary) await advance(batch)
+  if (!temporary) await advance(batch, acceptedMovements, refusedMovements)
   return temporary
 }
 
-async function advance(batch) {
-  const lastKey = {}
-  for (const op of batch) {
-    if (op.kind === 'product' || op.kind === 'movement')
-      lastKey[op.kind] = op.key
+async function advance(batch, acceptedMovements, refusedMovements) {
+  const lastMovement = batch.filter((op) => op.kind === 'movement').at(-1)
+  if (lastMovement) await setCursor('movement', lastMovement.key)
+
+  // A stock change the server has is marked, so it is never sent again. One it refused is
+  // not sent again either, but it is remembered as still only on this device.
+  if (acceptedMovements.length > 0) {
+    await db.stockMovements
+      .where('id')
+      .anyOf(acceptedMovements)
+      .modify((m) => {
+        m.synced = 1
+        delete m.rejected
+      })
   }
-  for (const [kind, key] of Object.entries(lastKey)) await setCursor(kind, key)
+  if (refusedMovements.length > 0) {
+    await db.stockMovements
+      .where('id')
+      .anyOf(refusedMovements)
+      .modify({ rejected: 1 })
+  }
+
+  const products = batch.filter((op) => op.kind === 'product')
+  if (products.length > 0) await markProductsSynced(products)
   await markVariantsSynced(batch.filter((op) => op.kind === 'variant'))
 }
 
@@ -162,7 +210,7 @@ async function saveLastRun(summary) {
       remaining: summary.remaining,
     },
   })
-  if (summary.outcome === 'ok' && summary.sent > 0) {
+  if (summary.outcome === 'ok' && (summary.sent > 0 || summary.pulled)) {
     await db.settings.put({ key: 'sync.lastSuccessAt', value: at })
   }
 }

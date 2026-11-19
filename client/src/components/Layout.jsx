@@ -1,4 +1,5 @@
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { useAuth } from '../auth/AuthGate'
 import SyncProvider from '../sync/SyncProvider'
 import BackupReminder from './BackupReminder'
 import OnlinePill from './OnlinePill'
@@ -24,6 +25,7 @@ const LINKS = [
 
 function LayoutBody() {
     const { pathname } = useLocation()
+    const auth = useAuth()
     // The billing screen uses the whole window and never scrolls the page on a laptop.
     const wide = pathname.startsWith('/billing')
 
@@ -43,6 +45,16 @@ function LayoutBody() {
                         <OnlinePill />
                         <SyncBadge />
                         <ThemeToggle />
+                        {auth.user && (
+                            <button
+                                type="button"
+                                onClick={auth.lock}
+                                title={`Signed in as ${auth.user.displayName || auth.user.username}. Lock the app.`}
+                                className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100"
+                            >
+                                Lock
+                            </button>
+                        )}
                     </div>
                 </div>
             </header>

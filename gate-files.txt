@@ -1,0 +1,1050 @@
+=== client\src\App.jsx ===
+import { Navigate, Route, Routes } from 'react-router-dom'
+import Layout from './components/Layout'
+import BillingPage from './pages/BillingPage'
+import SalesPage from './pages/SalesPage'
+import SaleDetailPage from './pages/SaleDetailPage'
+import ProductsPage from './pages/ProductsPage'
+import AddStockPage from './pages/AddStockPage'
+import ProductDetailPage from './pages/ProductDetailPage'
+import LabelsPage from './pages/LabelsPage'
+import SettingsPage from './pages/SettingsPage'
+import SyncPage from './pages/SyncPage'
+import BackupPage from './pages/BackupPage'
+import StoragePage from './pages/StoragePage'
+import ScannerTestPage from './pages/ScannerTestPage'
+import ImportPage from './pages/ImportPage'
+
+export default function App() {
+  return (
+    <Routes>
+      <Route element={<Layout />}>
+        <Route index element={<Navigate to="/products" replace />} />
+        <Route path="/billing" element={<BillingPage />} />
+        <Route path="/sales" element={<SalesPage />} />
+        <Route path="/sales/:id" element={<SaleDetailPage />} />
+        <Route path="/products" element={<ProductsPage />} />
+        <Route path="/stock/new" element={<AddStockPage />} />
+        <Route path="/products/new" element={<AddStockPage />} />
+        <Route path="/products/:id" element={<ProductDetailPage />} />
+        <Route path="/labels" element={<LabelsPage />} />
+        <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/sync" element={<SyncPage />} />
+        <Route path="/backup" element={<BackupPage />} />
+        <Route path="/storage" element={<StoragePage />} />
+        <Route path="/scanner" element={<ScannerTestPage />} />
+        <Route path="/import" element={<ImportPage />} />
+        <Route path="*" element={<p>Page not found</p>} />
+      </Route>
+    </Routes>
+  )
+}
+
+=== client\src\backup\backupService.js ===
+import { db } from '../db/db.js'
+import { AppError } from '../lib/errors.js'
+import { isStorageFull } from '../lib/storageErrors.js'
+
+export const BACKUP_FORMAT = 'clothing-pos-backup'
+export const BACKUP_VERSION = 1
+export const BACKUP_MAX_AGE_HOURS = 24
+
+// Every database table must be listed here. A test checks this list against
+// the real database, so a future table cannot be forgotten.
+export const BACKUP_TABLES = [
+  'products',
+  'variants',
+  'sales',
+  'saleItems',
+  'stockMovements',
+  'settings',
+  'syncQueue',
+  'printJobs',
+]
+
+// ---- Integrity check -------------------------------------------------------
+// A checksum catches truncated, damaged or edited files. It is NOT security.
+
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256)
+  for (let n = 0; n < 256; n += 1) {
+    let c = n
+    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+    table[n] = c >>> 0
+  }
+  return table
+})()
+
+function crc32(text) {
+  let c = 0xffffffff
+  for (let i = 0; i < text.length; i += 1) {
+    const unit = text.charCodeAt(i)
+    c = CRC_TABLE[(c ^ (unit & 0xff)) & 0xff] ^ (c >>> 8)
+    c = CRC_TABLE[(c ^ (unit >>> 8)) & 0xff] ^ (c >>> 8)
+  }
+  return ((c ^ 0xffffffff) >>> 0).toString(16).padStart(8, '0')
+}
+
+export function computeChecksum(tables) {
+  return crc32(JSON.stringify(tables))
+}
+
+function countRows(tables) {
+  return Object.fromEntries(
+    BACKUP_TABLES.map((name) => [name, tables[name]?.length ?? 0]),
+  )
+}
+
+// ---- Export ----------------------------------------------------------------
+
+export async function exportBackup() {
+  const tables = {}
+  // One read transaction, so every table comes from the same moment.
+  await db.transaction('r', db.tables, async () => {
+    for (const name of BACKUP_TABLES)
+      tables[name] = await db.table(name).toArray()
+  })
+
+  return {
+    format: BACKUP_FORMAT,
+    version: BACKUP_VERSION,
+    createdAt: new Date().toISOString(),
+    appDbVersion: db.verno,
+    counts: countRows(tables),
+    checksum: computeChecksum(tables),
+    tables,
+  }
+}
+
+export function backupToJson(backup) {
+  return JSON.stringify(backup)
+}
+
+export function backupFileName(
+  date = new Date(),
+  prefix = 'clothing-pos-backup',
+) {
+  const pad = (n) => String(n).padStart(2, '0')
+  const day = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+  return `${prefix}-${day}-${pad(date.getHours())}${pad(date.getMinutes())}.json`
+}
+
+// ---- Validation ------------------------------------------------------------
+
+// Checks a parsed file WITHOUT touching the database.
+// Returns { ok: true, summary } or { ok: false, error }.
+export function validateBackup(parsed) {
+  const fail = (error) => ({ ok: false, error })
+
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    Array.isArray(parsed) ||
+    parsed.format !== BACKUP_FORMAT
+  ) {
+    return fail('This file is not a Clothing POS backup.')
+  }
+  if (typeof parsed.version !== 'number' || parsed.version > BACKUP_VERSION) {
+    return fail(
+      'This backup was made by a newer version of the app. Update the app first.',
+    )
+  }
+  if (parsed.version !== BACKUP_VERSION) {
+    return fail('This backup version is not supported.')
+  }
+
+  const tables = parsed.tables
+  if (!tables || typeof tables !== 'object')
+    return fail('The backup has no data in it.')
+
+  for (const name of BACKUP_TABLES) {
+    if (!Array.isArray(tables[name]))
+      return fail(`The backup is missing the "${name}" data.`)
+
+    const keyField = name === 'settings' ? 'key' : 'id'
+    const seen = new Set()
+    for (const row of tables[name]) {
+      const valid =
+        row &&
+        typeof row === 'object' &&
+        !Array.isArray(row) &&
+        row[keyField] !== undefined &&
+        row[keyField] !== null &&
+        row[keyField] !== ''
+      if (!valid)
+        return fail(`The "${name}" data has an entry without an ${keyField}.`)
+      if (seen.has(row[keyField]))
+        return fail(`The "${name}" data has duplicate entries.`)
+      seen.add(row[keyField])
+    }
+  }
+
+  if (parsed.checksum !== computeChecksum(tables)) {
+    return fail(
+      'The backup file is damaged or was edited (its checksum does not match). Do not use it.',
+    )
+  }
+
+  const idsOf = (name) => new Set(tables[name].map((row) => row.id))
+  const productIds = idsOf('products')
+  const saleIds = idsOf('sales')
+  const variantIds = idsOf('variants')
+
+  if (tables.variants.some((v) => !productIds.has(v.productId))) {
+    return fail(
+      'The backup is inconsistent: some variants refer to products that are not in it.',
+    )
+  }
+  if (tables.saleItems.some((item) => !saleIds.has(item.saleId))) {
+    return fail(
+      'The backup is inconsistent: some sale items refer to sales that are not in it.',
+    )
+  }
+  if (tables.stockMovements.some((m) => !variantIds.has(m.variantId))) {
+    return fail(
+      'The backup is inconsistent: some stock records refer to variants that are not in it.',
+    )
+  }
+
+  return {
+    ok: true,
+    summary: { createdAt: parsed.createdAt, counts: countRows(tables) },
+  }
+}
+
+// ---- Restore ---------------------------------------------------------------
+
+// How the device looks right now, compared with a (valid) backup file.
+export async function compareWithDevice(parsed) {
+  const deviceCounts = {
+    products: await db.products.count(),
+    variants: await db.variants.count(),
+    sales: await db.sales.count(),
+  }
+  const salesNewerThanBackup = await db.sales
+    .where('createdAt')
+    .above(parsed.createdAt)
+    .count()
+  return {
+    deviceCounts,
+    salesNewerThanBackup,
+    hasData: deviceCounts.products + deviceCounts.sales > 0,
+  }
+}
+
+// Replaces ALL data on this device with the backup. All or nothing.
+export async function restoreBackup(parsed) {
+  const check = validateBackup(parsed)
+  if (!check.ok) throw new AppError('INVALID_BACKUP', check.error)
+
+  try {
+    await db.transaction('rw', db.tables, async () => {
+      for (const name of BACKUP_TABLES) await db.table(name).clear()
+      for (const name of BACKUP_TABLES) {
+        if (parsed.tables[name].length > 0)
+          await db.table(name).bulkAdd(parsed.tables[name])
+      }
+      // The data is now exactly as it was in the file, so that is the "last backup".
+      await db.settings.put({ key: 'lastBackupAt', value: parsed.createdAt })
+    })
+  } catch (err) {
+    console.error('Restore failed', err)
+    throw new AppError(
+      'RESTORE_FAILED',
+      isStorageFull(err)
+        ? 'This device does not have enough storage space to restore. Nothing was changed.'
+        : 'The backup could not be restored. Nothing on this device was changed.',
+    )
+  }
+  return check.summary
+}
+
+// ---- Backup status ---------------------------------------------------------
+
+export async function recordBackup(date = new Date()) {
+  await db.settings.put({ key: 'lastBackupAt', value: date.toISOString() })
+}
+
+// level: 'empty' (nothing to lose) | 'never' | 'stale' | 'ok'
+export async function getBackupStatus(now = new Date()) {
+  const products = await db.products.count()
+  const sales = await db.sales.count()
+  const row = await db.settings.get('lastBackupAt')
+  const lastBackupAt = row?.value ?? null
+
+  const hasData = products > 0 || sales > 0
+  const salesSince = lastBackupAt
+    ? await db.sales.where('createdAt').above(lastBackupAt).count()
+    : sales
+  const hoursSince = lastBackupAt
+    ? Math.floor((now.getTime() - new Date(lastBackupAt).getTime()) / 3_600_000)
+    : null
+
+  let level = 'ok'
+  if (!hasData) level = 'empty'
+  else if (!lastBackupAt) level = 'never'
+  else if (hoursSince >= BACKUP_MAX_AGE_HOURS) level = 'stale'
+
+  return { level, lastBackupAt, hoursSince, salesSince, products, sales }
+}
+
+// ---- Files (browser only) --------------------------------------------------
+
+export function saveTextFile(filename, text) {
+  const blob = new Blob([text], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+// Opens the phone's share sheet. Returns false when sharing files is not supported.
+export async function shareTextFile(filename, text) {
+  const file = new File([text], filename, { type: 'text/plain' })
+  if (!navigator.canShare?.({ files: [file] })) return false
+  await navigator.share({ files: [file], title: 'Clothing POS backup' })
+  return true
+}
+
+export function readFileAsText(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () =>
+      reject(reader.error ?? new Error('Could not read the file'))
+    reader.readAsText(file)
+  })
+}
+
+
+=== client\src\components\BackupReminder.jsx ===
+import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { useLiveQuery } from 'dexie-react-hooks'
+import { getBackupStatus } from '../backup/backupService'
+
+function ageText(hours) {
+    if (hours < 1) return 'less than an hour'
+    if (hours < 48) return `${hours} hours`
+    return `${Math.floor(hours / 24)} days`
+}
+
+// An amber banner shown on every page while the data is not backed up.
+export default function BackupReminder() {
+    // Re-checks every 5 minutes, so the banner appears even if nothing is being sold.
+    const [now, setNow] = useState(() => Date.now())
+    useEffect(() => {
+        const timer = setInterval(() => setNow(Date.now()), 5 * 60 * 1000)
+        return () => clearInterval(timer)
+    }, [])
+
+    const status = useLiveQuery(() => getBackupStatus(new Date(now)), [now])
+
+    if (!status || (status.level !== 'never' && status.level !== 'stale')) return null
+
+    const since = status.salesSince
+    const text =
+        status.level === 'never'
+            ? 'You have not made a backup yet. Your sales are stored only on this device.'
+            : `Your last backup was ${ageText(status.hoursSince)} ago${since ? ` (${since} ${since === 1 ? 'sale' : 'sales'} since)` : ''
+            }.`
+
+    return (
+        <div role="status" className="bg-amber-100 px-4 py-2 text-sm text-amber-900 print:hidden">
+            <div className="mx-auto flex max-w-3xl items-center justify-between gap-2">
+                <span>{text}</span>
+                <Link to="/backup" className="font-medium underline">
+                    Back up now
+                </Link>
+            </div>
+        </div>
+    )
+}
+
+=== client\src\db\saleRepo.js ===
+import { z } from 'zod'
+import { db } from './db.js'
+import { getSettings } from './settingsRepo.js'
+import { adjustStock } from './variantRepo.js'
+import { validate } from './schemas.js'
+import { calculateTotals } from '../billing/calc.js'
+import { AppError } from '../lib/errors.js'
+import { newId } from '../lib/id.js'
+import { summarizePayments } from '../lib/payments.js'
+
+// The older way of paying: one method for the whole bill.
+const paymentSchema = z.object({
+  method: z.enum(['cash', 'upi', 'card']),
+  amountTenderedPaise: z.number().int().nonnegative().optional(),
+  reference: z.string().trim().max(40).optional(),
+})
+
+// Saves a completed bill. `id` is the idempotency key: saving the same id again
+// returns the existing sale and changes nothing.
+// Payment:
+//   payments: [{ method, amountPaise, reference }]  cash + UPI + card, any short or
+//             extra amount is allowed (a short bill is a bargain, extra cash is change)
+//   payment:  { method, amountTenderedPaise }       one method for the whole bill; cash
+//             must cover the total
+//   neither:  the bill is saved as "payment pending" and paid later
+export async function createSale({ id, cart, payment, payments }) {
+  if (typeof id !== 'string' || !id) {
+    throw new AppError('VALIDATION_ERROR', 'A sale id is required')
+  }
+  const legacy =
+    payments === undefined && payment !== undefined && payment !== null
+      ? validate(paymentSchema, payment)
+      : null
+
+  if (!cart?.lines?.length)
+    throw new AppError('EMPTY_BILL', 'The bill is empty')
+  for (const line of cart.lines) {
+    if (!Number.isInteger(line.quantity) || line.quantity < 1) {
+      throw new AppError(
+        'VALIDATION_ERROR',
+        'Every item needs a quantity of at least 1',
+      )
+    }
+    if (!Number.isInteger(line.unitPricePaise) || line.unitPricePaise < 0) {
+      throw new AppError('VALIDATION_ERROR', 'Every item needs a valid price')
+    }
+  }
+
+  // Everything below is ONE transaction: it all saves, or none of it does.
+  // Only database calls are awaited inside, so the transaction stays open.
+  return db.transaction(
+    'rw',
+    db.sales,
+    db.saleItems,
+    db.variants,
+    db.stockMovements,
+    db.settings,
+    async () => {
+      const costByVariant = new Map() // what each item cost when it was sold
+      const existing = await db.sales.get(id)
+      if (existing) {
+        const items = await db.saleItems.where('saleId').equals(id).toArray()
+        items.sort((a, b) => a.lineNumber - b.lineNumber)
+        return { sale: existing, items, duplicate: true }
+      }
+
+      for (const line of cart.lines) {
+        const variant = await db.variants.get(line.variantId)
+        if (variant) costByVariant.set(line.variantId, variant.costPaise ?? 0)
+        if (!variant || variant.status !== 'active') {
+          throw new AppError(
+            'ITEM_UNAVAILABLE',
+            `${line.productName} (size ${line.size}) is no longer available`,
+          )
+        }
+      }
+
+      const settings = await getSettings()
+      const totals = calculateTotals(cart, {
+        roundToRupee: settings.roundToRupee,
+      })
+
+      let paid
+      if (Array.isArray(payments)) {
+        paid = summarizePayments(totals.totalPaise, payments)
+      } else if (legacy) {
+        let tendered = totals.totalPaise
+        if (
+          legacy.method === 'cash' &&
+          legacy.amountTenderedPaise !== undefined
+        ) {
+          tendered = legacy.amountTenderedPaise
+        }
+        if (tendered < totals.totalPaise) {
+          throw new AppError(
+            'INSUFFICIENT_PAYMENT',
+            'Cash received is less than the total',
+          )
+        }
+        paid = summarizePayments(totals.totalPaise, [
+          {
+            method: legacy.method,
+            amountPaise: tendered,
+            reference: legacy.reference,
+          },
+        ])
+      } else {
+        paid = summarizePayments(totals.totalPaise, [])
+      }
+      if (paid.error) throw new AppError('INVALID_PAYMENT', paid.error)
+
+      const counterRow = await db.settings.get('invoiceCounter')
+      const sequence = (counterRow?.value ?? 0) + 1
+      await db.settings.put({ key: 'invoiceCounter', value: sequence })
+      const invoiceNumber = `${settings.invoicePrefix}-${String(sequence).padStart(6, '0')}`
+
+      const createdAt = new Date().toISOString()
+      const sale = {
+        id,
+        invoiceNumber,
+        invoiceSequence: sequence,
+        status: 'completed',
+        syncStatus: 'pending',
+        createdAt,
+        shop: {
+          name: settings.shopName,
+          address: settings.address,
+          phone: settings.phone,
+          taxId: settings.taxId,
+          footer: settings.receiptFooter,
+        },
+        itemCount: totals.itemCount,
+        subtotalPaise: totals.subtotalPaise,
+        itemDiscountPaise: totals.itemDiscountPaise,
+        billDiscountPaise: totals.billDiscountPaise,
+        discountPaise: totals.discountPaise,
+        billDiscount: cart.billDiscount ?? null,
+        taxableValuePaise: totals.taxableValuePaise,
+        taxPaise: totals.taxPaise,
+        taxIncludedPaise: totals.taxIncludedPaise,
+        taxAddedPaise: totals.taxAddedPaise,
+        exactTotalPaise: totals.exactTotalPaise,
+        roundOffPaise: totals.roundOffPaise,
+        totalPaise: totals.totalPaise,
+        payment: paid.summary,
+        payments: paid.payments,
+        paymentStatus: paid.status,
+        receivedPaise: paid.receivedPaise,
+        shortPaise: paid.shortPaise,
+        paymentRecordedAt: paid.status === 'paid' ? createdAt : null,
+      }
+      await db.sales.add(sale)
+
+      const items = cart.lines.map((line, index) => {
+        const t = totals.lines[index]
+        return {
+          id: newId(),
+          saleId: id,
+          lineNumber: index + 1,
+          variantId: line.variantId,
+          productId: line.productId,
+          productName: line.productName,
+          sku: line.sku,
+          barcode: line.barcode,
+          size: line.size,
+          quantity: line.quantity,
+          unit: line.unit ?? 'piece',
+          unitPricePaise: line.unitPricePaise,
+          mrpPaise: line.mrpPaise,
+          costPaise: costByVariant.get(line.variantId) ?? 0,
+          taxRatePercent: line.taxRatePercent,
+          priceIncludesTax: line.priceIncludesTax,
+          discount: line.discount ?? null,
+          discountAllowed: line.discountAllowed !== false,
+          discountExcluded: line.discountExcluded === true,
+          grossPaise: t.grossPaise,
+          lineDiscountPaise: t.lineDiscountPaise,
+          billDiscountSharePaise: t.billDiscountSharePaise,
+          taxableValuePaise: t.taxableValuePaise,
+          taxPaise: t.taxPaise,
+          lineTotalPaise: t.lineTotalPaise,
+        }
+      })
+      await db.saleItems.bulkAdd(items)
+
+      // Stock changes and their movement records. If any item is short of
+      // stock this throws, and the WHOLE sale above is rolled back.
+      for (const line of cart.lines) {
+        await adjustStock({
+          variantId: line.variantId,
+          quantityChange: -line.quantity,
+          type: 'sale',
+          referenceId: id,
+        })
+      }
+
+      return { sale, items, duplicate: false }
+    },
+  )
+}
+
+export async function getSale(id) {
+  const sale = await db.sales.get(id)
+  if (!sale) return null
+  const items = await db.saleItems.where('saleId').equals(id).toArray()
+  items.sort((a, b) => a.lineNumber - b.lineNumber)
+  return { sale, items }
+}
+
+// Newest first.
+export function listSales({ limit = 50 } = {}) {
+  return db.sales.orderBy('createdAt').reverse().limit(limit).toArray()
+}
+
+
+=== client\src\db\schemas.js ===
+import { z } from 'zod'
+import { AppError } from '../lib/errors.js'
+
+const text = (max) => z.string().trim().min(1, 'Required').max(max)
+const optionalText = (max) => z.string().trim().max(max)
+
+export const productInputSchema = z.object({
+  name: text(120),
+  // company, category and supplier are optional
+  category: optionalText(60).default(''),
+  brand: optionalText(60).default(''),
+  supplier: optionalText(120).default(''),
+  // optional, so products saved before this setting existed can still be edited
+  discountAllowed: z.boolean().optional(),
+})
+
+const barcodeField = z
+  .string()
+  .trim()
+  .min(4, 'Barcode too short')
+  .max(48)
+  .regex(/^[A-Za-z0-9\-_.]+$/, 'Barcode has invalid characters')
+
+const variantFields = {
+  // Hidden. A new entry keeps it equal to its barcode, so older code and the server
+  // keep working. Nobody types it any more.
+  sku: optionalText(48).optional(),
+  barcode: barcodeField,
+  // Any text, even empty: "M", "32", "2-3 years", "Free size"
+  size: optionalText(50).default(''),
+  unit: z.enum(['piece', 'meter']).default('piece'),
+  costPaise: z.number().int().nonnegative(),
+  mrpPaise: z.number().int().nonnegative(),
+  sellingPricePaise: z.number().int().nonnegative(),
+  taxRatePercent: z.number().min(0).max(100),
+  priceIncludesTax: z.boolean(),
+  reorderThreshold: z.number().int().nonnegative(),
+}
+
+export const variantCreateSchema = z.object({
+  ...variantFields,
+  // empty means "make one automatically"
+  barcode: barcodeField.optional(),
+  productId: z.string().min(1),
+  openingStock: z.number().int().nonnegative(),
+})
+
+// Used for edits. Stock is NOT editable here; stock only changes via adjustStock.
+export const variantEditSchema = z.object(variantFields)
+
+export const settingsSchema = z.object({
+  shopName: text(80),
+  address: z.string().trim().max(200),
+  phone: z.string().trim().max(20),
+  taxId: z.string().trim().max(20),
+  invoicePrefix: z
+    .string()
+    .trim()
+    .regex(/^[A-Z0-9]{1,6}$/, 'Use 1-6 capital letters or digits'),
+  receiptFooter: z.string().trim().max(120),
+  receiptPaperWidth: z.enum(['58', '80', '80-42']),
+  receiptPrinter: z.enum(['simulated:ok', 'browser']),
+  receiptTextSize: z.enum(['normal', 'large', 'extra']),
+  receiptLanguage: z.enum(['en', 'mr']),
+  autoPrintReceipt: z.boolean(),
+  allowNegativeStock: z.boolean(),
+  roundToRupee: z.boolean(),
+})
+
+// Runs a schema and converts failures into our AppError.
+export function validate(schema, data) {
+  const result = schema.safeParse(data)
+  if (!result.success) {
+    throw new AppError(
+      'VALIDATION_ERROR',
+      'Some fields are invalid',
+      result.error.issues.map((i) => ({
+        field: i.path.join('.'),
+        message: i.message,
+      })),
+    )
+  }
+  return result.data
+}
+
+
+=== client\src\db\settingsRepo.js ===
+import { db } from './db.js'
+import { settingsSchema, validate } from './schemas.js'
+
+export const DEFAULT_SETTINGS = {
+  shopName: 'My Clothing Store',
+  address: '',
+  phone: '',
+  taxId: '',
+  invoicePrefix: 'INV',
+  receiptFooter: '',
+  receiptPaperWidth: '58',
+  receiptPrinter: 'simulated:ok',
+  receiptTextSize: 'large',
+  receiptLanguage: 'en',
+  autoPrintReceipt: false,
+  allowNegativeStock: false,
+  roundToRupee: true,
+}
+
+export async function getSettings() {
+  const rows = await db.settings.toArray()
+  const stored = Object.fromEntries(rows.map((r) => [r.key, r.value]))
+  return { ...DEFAULT_SETTINGS, ...stored }
+}
+
+export async function updateSettings(changes) {
+  const data = validate(settingsSchema.partial(), changes)
+  const rows = Object.entries(data).map(([key, value]) => ({ key, value }))
+  await db.settings.bulkPut(rows)
+  return getSettings()
+}
+
+
+=== client\src\main.jsx ===
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import { BrowserRouter } from 'react-router-dom'
+import './index.css'
+import App from './App.jsx'
+import DatabaseGate from './components/DatabaseGate.jsx'
+
+createRoot(document.getElementById('root')).render(
+  <StrictMode>
+    <DatabaseGate>
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </DatabaseGate>
+  </StrictMode>,
+)
+
+=== client\src\pages\BackupPage.jsx ===
+import { useState } from 'react'
+import { useLiveQuery } from 'dexie-react-hooks'
+import {
+    backupFileName,
+    backupToJson,
+    compareWithDevice,
+    exportBackup,
+    getBackupStatus,
+    readFileAsText,
+    recordBackup,
+    restoreBackup,
+    saveTextFile,
+    shareTextFile,
+    validateBackup,
+} from '../backup/backupService'
+import FormField from '../components/FormField'
+import { inputClass, primaryButton, secondaryButton } from '../components/styles'
+import { AppError } from '../lib/errors'
+import { formatDateTime } from '../lib/format'
+
+// `saveFile` and `shareFile` can be replaced in tests.
+export default function BackupPage({ saveFile = saveTextFile, shareFile = shareTextFile }) {
+    const status = useLiveQuery(() => getBackupStatus(), [])
+    const [message, setMessage] = useState(null)
+    const [busy, setBusy] = useState(false)
+    const [pending, setPending] = useState(null)
+    const [fileError, setFileError] = useState('')
+    const [confirmed, setConfirmed] = useState(false)
+    const [fileKey, setFileKey] = useState(0)
+
+    const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function'
+
+    async function handleDownload() {
+        setBusy(true)
+        setMessage(null)
+        try {
+            const backup = await exportBackup()
+            const name = backupFileName()
+            saveFile(name, backupToJson(backup))
+            await recordBackup(new Date())
+            setMessage({
+                type: 'ok',
+                text: `Backup saved as ${name}. Copy it somewhere other than this device: Google Drive, email to yourself, or a pen drive.`,
+            })
+        } catch (err) {
+            console.error(err)
+            setMessage({ type: 'error', text: 'The backup could not be created. Nothing was changed.' })
+        } finally {
+            setBusy(false)
+        }
+    }
+
+    async function handleShare() {
+        setBusy(true)
+        setMessage(null)
+        try {
+            const backup = await exportBackup()
+            const shared = await shareFile(backupFileName(), backupToJson(backup))
+            if (shared) {
+                await recordBackup(new Date())
+                setMessage({ type: 'ok', text: 'Backup shared.' })
+            } else {
+                setMessage({
+                    type: 'error',
+                    text: 'Sharing files is not available here. Use "Download backup file" instead.',
+                })
+            }
+        } catch (err) {
+            if (err?.name === 'AbortError') {
+                setMessage({ type: 'error', text: 'Sharing was cancelled. No backup was recorded.' })
+            } else {
+                console.error(err)
+                setMessage({ type: 'error', text: 'The backup could not be shared.' })
+            }
+        } finally {
+            setBusy(false)
+        }
+    }
+
+    async function handleFile(e) {
+        const file = e.target.files?.[0]
+        setPending(null)
+        setFileError('')
+        setConfirmed(false)
+        setMessage(null)
+        if (!file) return
+
+        try {
+            const text = await readFileAsText(file)
+            let parsed
+            try {
+                parsed = JSON.parse(text)
+            } catch {
+                setFileError('This file is not a valid backup. It could not be read.')
+                return
+            }
+            const check = validateBackup(parsed)
+            if (!check.ok) {
+                setFileError(check.error)
+                return
+            }
+            const comparison = await compareWithDevice(parsed)
+            setPending({ backup: parsed, summary: check.summary, comparison, fileName: file.name })
+        } catch (err) {
+            console.error(err)
+            setFileError('The file could not be read.')
+        }
+    }
+
+    async function handleRestore() {
+        if (!pending || !confirmed) return
+        setBusy(true)
+        setMessage(null)
+        try {
+            // Keep a copy of what is on the device now, in case this is a mistake.
+            if (pending.comparison.hasData) {
+                const safety = await exportBackup()
+                saveFile(backupFileName(new Date(), 'before-restore'), backupToJson(safety))
+            }
+            await restoreBackup(pending.backup)
+            const { counts } = pending.summary
+            setMessage({
+                type: 'ok',
+                text: `Backup restored: ${counts.products} products, ${counts.variants} variants, ${counts.sales} sales.`,
+            })
+            setPending(null)
+            setConfirmed(false)
+            setFileKey((k) => k + 1)
+        } catch (err) {
+            setMessage({
+                type: 'error',
+                text:
+                    err instanceof AppError
+                        ? err.message
+                        : 'The backup could not be restored. Nothing was changed.',
+            })
+        } finally {
+            setBusy(false)
+        }
+    }
+
+    const newer = pending?.comparison.salesNewerThanBackup ?? 0
+
+    return (
+        <div className="space-y-4">
+            <h2 className="text-xl font-bold">Backup and restore</h2>
+
+            <div className="space-y-1 rounded-xl bg-white p-4 text-sm shadow-sm">
+                <p className="font-semibold">Last backup</p>
+                {status === undefined ? (
+                    <p className="text-slate-500">Loading...</p>
+                ) : (
+                    <>
+                        <p>{status.lastBackupAt ? formatDateTime(status.lastBackupAt) : 'Never'}</p>
+                        <p>
+                            {status.salesSince} {status.salesSince === 1 ? 'sale' : 'sales'} since the last
+                            backup
+                        </p>
+                    </>
+                )}
+            </div>
+
+            <div className="space-y-3 rounded-xl bg-white p-4 shadow-sm">
+                <p className="font-semibold">Make a backup</p>
+                <p className="text-sm text-slate-600">
+                    The file contains all your products, stock and sales, including purchase costs. Keep it
+                    private, and keep a copy off this device.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                    <button type="button" className={primaryButton} disabled={busy} onClick={handleDownload}>
+                        Download backup file
+                    </button>
+                    {canShare && (
+                        <button type="button" className={secondaryButton} disabled={busy} onClick={handleShare}>
+                            Share backup
+                        </button>
+                    )}
+                </div>
+            </div>
+
+            {message && (
+                <p
+                    role={message.type === 'error' ? 'alert' : 'status'}
+                    className={`rounded-lg p-3 text-sm ${message.type === 'error' ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'
+                        }`}
+                >
+                    {message.text}
+                </p>
+            )}
+
+            <div className="space-y-3 rounded-xl bg-white p-4 shadow-sm">
+                <p className="font-semibold">Restore from a backup file</p>
+                <p className="text-sm text-slate-600">
+                    Restoring replaces <strong>everything</strong> on this device with the file, including
+                    invoice numbers. Use it for a new or repaired device, or after data loss.
+                </p>
+                <FormField label="Backup file" htmlFor="backup-file">
+                    <input
+                        key={fileKey}
+                        id="backup-file"
+                        type="file"
+                        accept=".json,application/json"
+                        className={inputClass}
+                        onChange={handleFile}
+                    />
+                </FormField>
+
+                {fileError && (
+                    <p role="alert" className="rounded-lg bg-red-100 p-3 text-sm text-red-800">
+                        {fileError}
+                    </p>
+                )}
+
+                {pending && (
+                    <div className="space-y-2 rounded-lg bg-slate-50 p-3 text-sm">
+                        <p className="font-semibold">File: {pending.fileName}</p>
+                        <p>Made on {formatDateTime(pending.summary.createdAt)}</p>
+                        <p>
+                            The file contains: {pending.summary.counts.products} products,{' '}
+                            {pending.summary.counts.variants} variants, {pending.summary.counts.sales} sales
+                        </p>
+                        <p>
+                            This device has now: {pending.comparison.deviceCounts.products} products,{' '}
+                            {pending.comparison.deviceCounts.variants} variants,{' '}
+                            {pending.comparison.deviceCounts.sales} sales
+                        </p>
+                        {newer > 0 && (
+                            <p role="alert" className="rounded bg-red-100 p-2 text-red-800">
+                                This device has {newer} {newer === 1 ? 'sale' : 'sales'} made after this backup.
+                                Restoring will remove {newer === 1 ? 'it' : 'them'} from this device. A safety copy
+                                of the current data is saved first.
+                            </p>
+                        )}
+                        <label className="flex items-start gap-2">
+                            <input
+                                type="checkbox"
+                                className="mt-1"
+                                checked={confirmed}
+                                onChange={(e) => setConfirmed(e.target.checked)}
+                            />
+                            <span>I understand this replaces all data on this device</span>
+                        </label>
+                        <button
+                            type="button"
+                            className={primaryButton}
+                            disabled={!confirmed || busy}
+                            onClick={handleRestore}
+                        >
+                            Restore backup
+                        </button>
+                    </div>
+                )}
+            </div>
+
+            <div className="rounded-xl bg-white p-4 text-sm text-slate-600 shadow-sm">
+                <p className="font-semibold text-slate-800">A simple routine</p>
+                <ul className="list-disc space-y-1 pl-5">
+                    <li>Back up at the end of every day.</li>
+                    <li>Keep the last 7 files, in at least two places (for example Drive and a pen drive).</li>
+                    <li>Once a month, restore a file on a spare browser to prove it works.</li>
+                </ul>
+            </div>
+        </div>
+    )
+}
+
+=== server\src\app.js ===
+import { randomUUID } from "node:crypto";
+import cors from "cors";
+import express from "express";
+import helmet from "helmet";
+import { errorHandler, notFoundHandler } from "./http/errorHandler.js";
+import { createLimiter } from "./http/rateLimiter.js";
+import { authRouter } from "./routes/auth.js";
+import { healthRouter } from "./routes/health.js";
+import { productsRouter } from "./routes/products.js";
+import { salesRouter } from "./routes/sales.js";
+import { settingsRouter } from "./routes/settings.js";
+import { syncRouter } from "./routes/sync.js";
+import { usersRouter } from "./routes/users.js";
+import { variantsRouter } from "./routes/variants.js";
+
+// Builds the Express app from a config object. It does not start a server or
+// connect to a database, so tests can create as many as they like.
+export function createApp(config) {
+  const app = express();
+
+  app.disable("x-powered-by");
+  app.set("trust proxy", config.trustProxy);
+
+  // Every request gets an id, returned in a header and in error bodies, so a
+  // problem report can be matched to the server log.
+  app.use((req, res, next) => {
+    req.id = randomUUID();
+    res.setHeader("x-request-id", req.id);
+    next();
+  });
+
+  app.use(helmet());
+  app.use(
+    cors({
+      origin: (origin, callback) =>
+        callback(null, !origin || config.clientOrigins.includes(origin)),
+      methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+      allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key"],
+      maxAge: 600,
+    }),
+  );
+  app.use(express.json({ limit: "1mb" }));
+  app.use("/api", createLimiter(config.apiRateLimit));
+
+  app.use("/api/health", healthRouter());
+  app.use("/api/auth", authRouter(config));
+  app.use("/api/users", usersRouter(config));
+  app.use("/api/settings", settingsRouter(config));
+  app.use("/api/products", productsRouter(config));
+  app.use("/api/variants", variantsRouter(config));
+  app.use("/api/sales", salesRouter(config));
+  app.use("/api/sync", syncRouter(config));
+
+  app.use(notFoundHandler);
+  app.use(errorHandler(console));
+
+  return app;
+}
+
+

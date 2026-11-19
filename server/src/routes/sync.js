@@ -1,14 +1,22 @@
 import { Router } from "express";
+import { z } from "zod";
 import { requireAuth, requireRole } from "../auth/middleware.js";
 import { pushEnvelopeSchema } from "../domain/syncSchemas.js";
-import { AppError } from "../errors.js";
+import { AppError, notFound } from "../errors.js";
 import { asyncHandler } from "../http/asyncHandler.js";
 import { parse } from "../http/validate.js";
 import { Product } from "../models/Product.js";
 import { Sale } from "../models/Sale.js";
+import { StockMovement } from "../models/StockMovement.js";
 import { Variant } from "../models/Variant.js";
 import { audit } from "../services/audit.js";
+import { PULL_KINDS, pullPage } from "../services/pull.js";
 import { applyOperation } from "../services/sync.js";
+
+const pullQuerySchema = z.object({
+  after: z.string().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+});
 
 export function syncRouter(config) {
   const router = Router();
@@ -68,6 +76,40 @@ export function syncRouter(config) {
       });
 
       res.json({ results });
+    }),
+  );
+
+  // Download: everything of one kind that changed after a cursor, in pages. Read-only.
+  // kind: products | variants | sales | movements
+  router.get(
+    "/pull/:kind",
+    requireRole("admin"),
+    asyncHandler(async (req, res) => {
+      const { kind } = req.params;
+      if (!Object.hasOwn(PULL_KINDS, kind)) {
+        throw notFound(`There is nothing to download called "${kind}"`);
+      }
+      const query = parse(pullQuerySchema, req.query);
+      const page = await pullPage(kind, query);
+      res.json({ ...page, serverTime: new Date().toISOString() });
+    }),
+  );
+
+  // How much there is to download, so a new device can show its progress.
+  router.get(
+    "/pull-summary",
+    requireRole("admin"),
+    asyncHandler(async (req, res) => {
+      const [products, variants, sales, movements] = await Promise.all([
+        Product.countDocuments(),
+        Variant.countDocuments(),
+        Sale.countDocuments(),
+        StockMovement.countDocuments(),
+      ]);
+      res.json({
+        serverTime: new Date().toISOString(),
+        counts: { products, variants, sales, movements },
+      });
     }),
   );
 

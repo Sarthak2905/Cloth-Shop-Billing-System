@@ -90,5 +90,13 @@ export function createApiClient({
     push: (ops) => request('POST', '/sync/push', { ops }),
     status: () => request('GET', '/sync/status'),
     stockLevels: () => request('GET', '/sync/stock-levels'),
+    pullPage: (kind, { after, limit } = {}) => {
+      const query = new URLSearchParams()
+      if (after) query.set('after', after)
+      if (limit) query.set('limit', String(limit))
+      const text = query.toString()
+      return request('GET', `/sync/pull/${kind}${text ? `?${text}` : ''}`)
+    },
+    pullSummary: () => request('GET', '/sync/pull-summary'),
   }
 }

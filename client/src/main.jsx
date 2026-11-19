@@ -3,13 +3,16 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import './index.css'
 import App from './App.jsx'
+import AuthGate from './auth/AuthGate.jsx'
 import DatabaseGate from './components/DatabaseGate.jsx'
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>
     <DatabaseGate>
       <BrowserRouter>
-        <App />
+        <AuthGate>
+          <App />
+        </AuthGate>
       </BrowserRouter>
     </DatabaseGate>
   </StrictMode>,

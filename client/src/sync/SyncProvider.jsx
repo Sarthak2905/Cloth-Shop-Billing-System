@@ -30,7 +30,7 @@ const EMPTY_COUNTS = {
 
 // `api`, `autoSync`, `autoDelayMs`, `intervalMs` and `firstSyncManual` can be replaced in
 // tests. With `firstSyncManual` (the default) nothing is sent by itself until the first
-// sync has been started by hand and has worked: it is a deliberate step, after a backup.
+// sync (or the first download) has worked: it is a deliberate step, after a backup.
 export default function SyncProvider({
     children,
     api: apiProp,
@@ -43,6 +43,7 @@ export default function SyncProvider({
     const sessionRef = useRef(session)
     const online = useOnlineStatus()
     const [syncing, setSyncing] = useState(false)
+    const [pullProgress, setPullProgress] = useState(null)
     const [clock, setClock] = useState(null)
     const [notice, setNotice] = useState('')
     const busy = useRef(false)
@@ -55,6 +56,7 @@ export default function SyncProvider({
 
     const counts = useLiveQuery(() => countPending(), []) ?? EMPTY_COUNTS
     const lastRun = useLiveQuery(async () => (await db.settings.get('sync.lastRun'))?.value ?? null, [])
+    const lastPull = useLiveQuery(async () => (await db.settings.get('sync.lastPullResult'))?.value ?? null, [])
     const lastSuccessAt = useLiveQuery(
         async () => (await db.settings.get('sync.lastSuccessAt'))?.value ?? null,
         [],
@@ -93,7 +95,8 @@ export default function SyncProvider({
             try {
                 let summary
                 try {
-                    summary = await runSync({ api })
+                    // sending always comes first, then downloading; a manual run downloads at once
+                    summary = await runSync({ api, pull: true, forcePull: manual, onProgress: setPullProgress })
                 } catch (err) {
                     console.error('Sync stopped because of a problem on this device', err)
                     summary = { outcome: 'server-error', sent: 0, message: 'Sync stopped because of a problem on this device.' }
@@ -120,6 +123,7 @@ export default function SyncProvider({
             } finally {
                 busy.current = false
                 setSyncing(false)
+                setPullProgress(null)
             }
         },
         [api, endSession],
@@ -134,7 +138,18 @@ export default function SyncProvider({
         return () => clearTimeout(timer)
     }, [autoAllowed, session, online, counts.total, run, autoDelayMs])
 
-    // A safety net: check again every minute (retries wait for their back-off time).
+    // When the app opens, or the connection comes back, send and download once.
+    const hasSession = Boolean(session)
+    useEffect(() => {
+        if (!autoAllowed || !hasSession || !online) return undefined
+        const timer = setTimeout(() => {
+            run()
+        }, autoDelayMs)
+        return () => clearTimeout(timer)
+    }, [autoAllowed, hasSession, online, run, autoDelayMs])
+
+    // A safety net: check again every minute (retries wait for their back-off time, and
+    // downloading happens at most every 2 minutes).
     useEffect(() => {
         if (!autoAllowed || !session) return undefined
         const timer = setInterval(() => {
@@ -168,8 +183,10 @@ export default function SyncProvider({
             signedIn,
             online,
             syncing,
+            pullProgress,
             counts,
             lastRun: lastRun ?? null,
+            lastPull: lastPull ?? null,
             lastSuccessAt: lastSuccessAt ?? null,
             clock,
             notice,
@@ -177,8 +194,9 @@ export default function SyncProvider({
             signIn,
             signOut,
             syncNow: () => run({ manual: true }),
+            pullNow: () => run({ manual: true }),
         }),
-        [session, signedIn, online, syncing, counts, lastRun, lastSuccessAt, clock, notice, api, signIn, signOut, run],
+        [session, signedIn, online, syncing, pullProgress, counts, lastRun, lastPull, lastSuccessAt, clock, notice, api, signIn, signOut, run],
     )
 
     return <SyncContext.Provider value={value}>{children}</SyncContext.Provider>

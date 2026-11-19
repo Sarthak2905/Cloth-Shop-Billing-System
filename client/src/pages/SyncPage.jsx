@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import FormField from '../components/FormField'
 import { inputClass, primaryButton, secondaryButton } from '../components/styles'
+import { db } from '../db/db'
 import { formatDateTime } from '../lib/format'
 import {
     dismissAttention,
@@ -18,6 +19,13 @@ const KIND_LABEL = {
     variant: 'Item',
     product: 'Product',
     movement: 'Stock change',
+}
+
+const PROGRESS_LABEL = {
+    products: 'products',
+    variants: 'items',
+    movements: 'stock records',
+    sales: 'bills',
 }
 
 function LoginForm({ signIn }) {
@@ -111,6 +119,65 @@ function FirstSyncCard({ counts, onStart, busy }) {
             </label>
             <button type="button" className={primaryButton} disabled={!backedUp || busy} onClick={onStart}>
                 Start first sync
+            </button>
+        </div>
+    )
+}
+
+// Downloading what the server has. On a device with no data it is the first thing to do.
+function DownloadCard({ sync, emptyDevice }) {
+    const { pullProgress: progress, lastPull: result } = sync
+
+    return (
+        <div
+            data-testid="download-card"
+            className={`space-y-2 rounded-xl bg-white p-4 text-sm shadow-sm ${emptyDevice ? 'border-l-4 border-blue-500' : ''}`}
+        >
+            <p className="font-semibold">{emptyDevice ? 'Download your shop data' : 'Download from server'}</p>
+            <p className="text-slate-600">
+                {emptyDevice
+                    ? 'This device has no data yet. Download your products, stock and bills from the server. It can take a few minutes, and nothing on the server is changed.'
+                    : 'Brings changes made on another device. Whatever is waiting on this device is sent first, and a change made here is never overwritten.'}
+            </p>
+            {progress && (
+                <p role="status" className="text-slate-700">
+                    Downloading {PROGRESS_LABEL[progress.kind] ?? progress.kind}: {progress.done}
+                    {progress.total ? ` of ${progress.total}` : ''}
+                </p>
+            )}
+            {result && (
+                <div data-testid="download-result" className="space-y-1 text-slate-700">
+                    <p>
+                        Last download {formatDateTime(result.at)}: {result.products} products, {result.variants}{' '}
+                        items, {result.movements} stock records, {result.sales} bills.
+                    </p>
+                    {result.stockChanged > 0 && (
+                        <p>Stock of {result.stockChanged} items was updated from the server.</p>
+                    )}
+                    {result.skipped > 0 && (
+                        <p className="text-amber-700">
+                            {result.skipped} changes made on this device were kept (they are sent next).
+                        </p>
+                    )}
+                    {result.conflicts?.length > 0 && (
+                        <div role="alert" className="rounded bg-red-100 p-2 text-red-800">
+                            <p className="font-medium">Not downloaded (the same number is used on this device):</p>
+                            <ul className="list-disc pl-5">
+                                {result.conflicts.slice(0, 5).map((text) => (
+                                    <li key={text}>{text}</li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
+                </div>
+            )}
+            <button
+                type="button"
+                className={emptyDevice ? primaryButton : secondaryButton}
+                disabled={!sync.signedIn || sync.syncing}
+                onClick={sync.pullNow}
+            >
+                {sync.syncing ? 'Working...' : 'Download data from server'}
             </button>
         </div>
     )
@@ -245,6 +312,9 @@ export default function SyncPage() {
     const { counts } = sync
     const catalogue = counts.products + counts.variants
     const firstSync = sync.signedIn && !sync.lastSuccessAt && counts.total > 0
+    const productCount = useLiveQuery(() => db.products.count(), [])
+    const emptyDevice =
+        sync.signedIn && productCount === 0 && !sync.lastSuccessAt && counts.total === 0
 
     return (
         <div className="space-y-4">
@@ -295,6 +365,8 @@ export default function SyncPage() {
                 </div>
             </div>
 
+            {emptyDevice && <DownloadCard sync={sync} emptyDevice />}
+
             {firstSync && <FirstSyncCard counts={counts} busy={sync.syncing} onStart={sync.syncNow} />}
 
             <ClockNotice clock={sync.clock} />
@@ -302,6 +374,8 @@ export default function SyncPage() {
             {!sync.signedIn && <LoginForm signIn={sync.signIn} />}
 
             <AttentionList />
+
+            {sync.signedIn && !emptyDevice && <DownloadCard sync={sync} emptyDevice={false} />}
 
             {sync.signedIn && <StockCheck api={sync.api} waiting={counts.total} />}
         </div>

@@ -1,5 +1,5 @@
 import { db } from '../db/db'
-import { getCursor, getVariantHashes } from './cursors'
+import { getCursor, getProductHashes, getVariantHashes } from './cursors'
 import {
   movementOp,
   productOp,
@@ -38,22 +38,30 @@ const cancelledSales = () =>
 async function pendingCatalogAndStock() {
   const productCursor = await getCursor('product')
   const movementCursor = await getCursor('movement')
-  const hashes = await getVariantHashes()
+  const productHashes = await getProductHashes()
+  const variantHashes = await getVariantHashes()
 
+  // A product is pending when its content is not what the server has. (A device that was
+  // synced before fingerprints existed still follows its old cursor until the first send.)
   const products = (await db.products.toArray())
     .map(productOp)
-    .filter((op) => op.key > productCursor)
+    .filter((op) =>
+      productHashes
+        ? productHashes[op.entityId] !== op.fingerprint
+        : op.key > productCursor,
+    )
     .sort(byKey)
 
   // Only a change to an item's catalogue fields makes it pending. A stock change does not.
   const variants = (await db.variants.toArray())
     .map(variantOp)
-    .filter((op) => hashes[op.entityId] !== op.fingerprint)
+    .filter((op) => variantHashes[op.entityId] !== op.fingerprint)
     .sort(byKey)
 
   // Sale movements are not sent: the server makes its own when it saves the sale.
+  // Movements that came down from the server are marked `synced`.
   const movements = (await db.stockMovements.toArray())
-    .filter((m) => m.type !== 'sale')
+    .filter((m) => m.type !== 'sale' && !m.synced)
     .map(movementOp)
     .filter((op) => op.key > movementCursor)
     .sort(byKey)

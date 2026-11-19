@@ -8,7 +8,8 @@
     "start": "node src/server.js",
     "test": "vitest run",
     "seed:admin": "node src/scripts/seedAdmin.js",
-        "reset:password": "node src/scripts/resetPassword.js"
+    "reset:password": "node src/scripts/resetPassword.js",
+    "wipe:data": "node src/scripts/wipeData.js"
   },
   "keywords": [],
   "author": "",
