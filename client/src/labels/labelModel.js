@@ -35,9 +35,15 @@ export function labelDetail(variant) {
 }
 
 // priceMode: 'mrp' | 'selling' | 'none'. Fabric prices are per meter, so they say "/ m".
-export function buildLabel(variant, product, { priceMode = 'mrp' } = {}) {
+// header: a name printed at the top of the label (for example the shop name). Empty = none.
+export function buildLabel(
+  variant,
+  product,
+  { priceMode = 'mrp', header = '' } = {},
+) {
   const { symbology, warning } = chooseSymbology(variant.barcode)
   const per = variant.unit === 'meter' ? ' / m' : ''
+  const top = String(header ?? '').trim()
 
   let priceText = null
   if (priceMode === 'mrp')
@@ -56,5 +62,6 @@ export function buildLabel(variant, product, { priceMode = 'mrp' } = {}) {
     symbology,
     warning,
     priceText,
+    ...(top ? { header: top } : {}),
   }
 }

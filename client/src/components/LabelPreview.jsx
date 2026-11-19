@@ -4,8 +4,10 @@ import { generateBarcodeSvg } from '../labels/barcodeSvg'
 const PADDING_MM = 1.5
 
 export default function LabelPreview({ label, widthMm, heightMm }) {
-    // A label with no size line has room for a taller barcode.
-    const barcodeHeightMm = Math.max(6, Math.round(heightMm * (label.detail ? 0.36 : 0.44)))
+    // A label with no size line has room for a taller barcode, and a name at the top takes
+    // a little of that room.
+    const share = (label.detail ? 0.36 : 0.44) - (label.header ? 0.12 : 0)
+    const barcodeHeightMm = Math.max(6, Math.round(heightMm * share))
     // The width the barcode may use, so its bars can be a whole number of printer dots wide.
     const availableMm = widthMm - 2 * PADDING_MM
     const [svg, setSvg] = useState('')
@@ -44,6 +46,15 @@ export default function LabelPreview({ label, widthMm, heightMm }) {
                 breakInside: 'avoid',
             }}
         >
+            {label.header && (
+                <p
+                    data-testid="label-header"
+                    className="truncate text-center font-bold leading-tight"
+                    style={{ fontSize: '3mm' }}
+                >
+                    {label.header}
+                </p>
+            )}
             <p className="truncate font-semibold leading-tight" style={{ fontSize: '2.8mm' }}>
                 {label.title}
             </p>

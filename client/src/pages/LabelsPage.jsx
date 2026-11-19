@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { listSellableVariants } from '../db/catalogRepo'
+import { db } from '../db/db'
 import { chooseSymbology } from '../labels/ean'
 import { checkHelper, sendToHelper } from '../labels/helperClient'
 import { LABEL_PRESETS, buildLabel, validateLabelSize } from '../labels/labelModel'
@@ -12,6 +13,8 @@ import { inputClass, primaryButton, secondaryButton } from '../components/styles
 import { clearLabelPreset, readLabelPreset } from '../lib/labelPreset'
 
 const MAX_LABELS = 200
+const HEADER_KEY = 'labelHeader'
+const HEADER_MAX = 30
 
 const stockText = (variant) =>
     variant.unit === 'meter' ? `${(variant.currentStock / 100).toFixed(2)} m` : String(variant.currentStock)
@@ -37,6 +40,7 @@ export default function LabelsPage() {
     const [customHeight, setCustomHeight] = useState('25')
     const [priceMode, setPriceMode] = useState('mrp')
     const [search, setSearch] = useState('')
+    const [header, setHeader] = useState('') // the name printed at the top of every label
     const [printer, setPrinter] = useState(() => loadPrinterSettings())
     const [status, setStatus] = useState(null) // { type: 'ok' | 'error', text }
     const [busy, setBusy] = useState(false)
@@ -44,6 +48,26 @@ export default function LabelsPage() {
     useEffect(() => {
         clearLabelPreset()
     }, [])
+
+    // The name at the top is kept with the shop's settings, so it is there next time.
+    useEffect(() => {
+        let cancelled = false
+        db.settings
+            .get(HEADER_KEY)
+            .then((row) => {
+                if (!cancelled) setHeader(typeof row?.value === 'string' ? row.value : '')
+            })
+            .catch(() => { })
+        return () => {
+            cancelled = true
+        }
+    }, [])
+
+    function changeHeader(text) {
+        const value = text.slice(0, HEADER_MAX)
+        setHeader(value)
+        db.settings.put({ key: HEADER_KEY, value }).catch(() => { })
+    }
 
     const preset = LABEL_PRESETS.find((p) => p.id === presetId)
     const widthMm = preset ? preset.widthMm : Number(customWidth)
@@ -63,10 +87,10 @@ export default function LabelsPage() {
             (items ?? []).flatMap(({ variant, product }) => {
                 const count = copies[variant.id] ?? 0
                 if (!count) return []
-                const label = buildLabel(variant, product, { priceMode })
+                const label = buildLabel(variant, product, { priceMode, header })
                 return Array.from({ length: count }, (_, i) => ({ key: `${variant.id}-${i}`, label }))
             }),
-        [items, copies, priceMode],
+        [items, copies, priceMode, header],
     )
     const visible = labels.slice(0, MAX_LABELS)
 
@@ -127,7 +151,9 @@ export default function LabelsPage() {
         }
         const entries = (items ?? []).flatMap(({ variant, product }) => {
             const count = copies[variant.id] ?? 0
-            return count ? [{ label: buildLabel(variant, product, { priceMode }), copies: count }] : []
+            return count
+                ? [{ label: buildLabel(variant, product, { priceMode, header }), copies: count }]
+                : []
         })
         const total = entries.reduce((n, entry) => n + entry.copies, 0)
         return sendDirect(
@@ -220,6 +246,22 @@ export default function LabelsPage() {
                             <option value="selling">Selling price</option>
                             <option value="none">No price</option>
                         </select>
+                    </FormField>
+
+                    <FormField
+                        label="Name at the top of the label"
+                        htmlFor="label-header"
+                        hint="Printed at the top of every label, for example your shop name. Leave empty for none."
+                    >
+                        <input
+                            id="label-header"
+                            className={inputClass}
+                            maxLength={HEADER_MAX}
+                            autoComplete="off"
+                            value={header}
+                            onChange={(e) => changeHeader(e.target.value)}
+                            placeholder="SG Dhokate"
+                        />
                     </FormField>
                 </div>
 

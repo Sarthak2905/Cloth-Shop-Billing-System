@@ -77,6 +77,20 @@ export async function renderLabelBitmap(
   const inner = width - 2 * pad
   let y = pad
 
+  // the name at the top (for example the shop name), centred
+  if (label.header) {
+    const header = fitText(ctx, label.header, inner, {
+      size: 22,
+      minSize: 13,
+      weight: 'bold',
+    })
+    ctx.font = header.font
+    ctx.textAlign = 'center'
+    ctx.fillText(header.text, width / 2, y)
+    ctx.textAlign = 'left'
+    y += header.size + 4
+  }
+
   const title = fitText(ctx, label.title, inner, {
     size: 24,
     minSize: 14,
