@@ -1,3 +1,4 @@
+import { formatDateTime } from '../lib/format'
 import { useEffect, useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { listSellableVariants } from '../db/catalogRepo'
@@ -33,6 +34,19 @@ const printCss = (widthMm, heightMm) => `
 
 export default function LabelsPage() {
     const items = useLiveQuery(() => listSellableVariants(), [])
+    // When stock was last added for each item (opening stock or a purchase).
+    const addedAt = useLiveQuery(async () => {
+        const moves = await db.stockMovements.toArray()
+        const latest = new Map()
+        for (const m of moves) {
+            if (m.type !== 'opening' && m.type !== 'purchase') continue
+            if (!latest.has(m.variantId) || m.createdAt > latest.get(m.variantId)) {
+                latest.set(m.variantId, m.createdAt)
+            }
+        }
+        return latest
+    }, [])
+    const addedOn = (variant) => addedAt?.get(variant.id) ?? variant.createdAt
     // Coming from "Add stock", the new entries already have their copies filled in.
     const [copies, setCopies] = useState(() => readLabelPreset())
     const [presetId, setPresetId] = useState(LABEL_PRESETS[0].id)
@@ -89,7 +103,7 @@ export default function LabelsPage() {
             (query.length >= 6 && variant.barcode.toLowerCase().includes(query)) ||
             (typedPaise !== null &&
                 (variant.mrpPaise === typedPaise || variant.sellingPricePaise === typedPaise)),
-    )
+    ).sort((a, b) => String(addedOn(b.variant)).localeCompare(String(addedOn(a.variant))))
 
     const labels = useMemo(
         () =>
@@ -437,6 +451,11 @@ export default function LabelsPage() {
                                         <p className="text-xs text-slate-500">
                                             {variant.barcode} · Stock {stockText(variant)}
                                         </p>
+                                        {addedOn(variant) && (
+                                            <p className="text-xs text-slate-500">
+                                                Added {formatDateTime(addedOn(variant))}
+                                            </p>
+                                        )}
                                         {warning && <p className="text-xs text-amber-700">{warning}</p>}
                                     </div>
                                     <input
