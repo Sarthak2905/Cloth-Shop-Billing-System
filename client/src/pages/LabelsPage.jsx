@@ -75,11 +75,20 @@ export default function LabelsPage() {
     const sizeError = validateLabelSize(widthMm, heightMm)
 
     const query = search.trim().toLowerCase()
+    // A typed number such as 299 or 299.50 is also looked up as a price (MRP or selling price).
+    const typedPaise = (() => {
+        const text = query.replace(/[₹,\s]/g, '')
+        if (!/^\d+(\.\d{1,2})?$/.test(text)) return null
+        return Math.round(Number(text) * 100)
+    })()
     const shown = (items ?? []).filter(
         ({ variant, product }) =>
             !query ||
             product.name.toLowerCase().includes(query) ||
-            variant.barcode.toLowerCase().includes(query),
+            // short numbers are prices, so only long numbers are looked up inside the barcode
+            (query.length >= 6 && variant.barcode.toLowerCase().includes(query)) ||
+            (typedPaise !== null &&
+                (variant.mrpPaise === typedPaise || variant.sellingPricePaise === typedPaise)),
     )
 
     const labels = useMemo(
@@ -383,7 +392,7 @@ export default function LabelsPage() {
                             className={inputClass}
                             value={search}
                             onChange={(e) => setSearch(e.target.value)}
-                            placeholder="Name or barcode"
+                            placeholder="Name, barcode or price (e.g. 299)"
                         />
                     </FormField>
                     <div className="flex flex-wrap gap-2">
