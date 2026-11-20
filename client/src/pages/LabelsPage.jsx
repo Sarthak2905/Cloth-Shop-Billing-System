@@ -1,21 +1,22 @@
-import { formatDateTime } from '../lib/format'
 import { useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { listSellableVariants } from '../db/catalogRepo'
 import { db } from '../db/db'
 import { chooseSymbology } from '../labels/ean'
-import { checkHelper, sendToHelper } from '../labels/helperClient'
+import { sendToHelper } from '../labels/helperClient'
 import { LABEL_PRESETS, buildLabel, validateLabelSize } from '../labels/labelModel'
-import { buildLabelPrintJob, buildTestPrintJob } from '../labels/printJob'
-import { loadPrinterSettings, savePrinterSettings, tsplOptions } from '../labels/printerSettings'
+import { loadLabelPrefs } from '../labels/labelPrefs'
+import { buildLabelPrintJob } from '../labels/printJob'
+import { loadPrinterSettings, tsplOptions } from '../labels/printerSettings'
 import LabelPreview from '../components/LabelPreview'
 import FormField from '../components/FormField'
 import { inputClass, primaryButton, secondaryButton } from '../components/styles'
+import { formatDateTime } from '../lib/format'
 import { clearLabelPreset, readLabelPreset } from '../lib/labelPreset'
 
 const MAX_LABELS = 200
 const HEADER_KEY = 'labelHeader'
-const HEADER_MAX = 30
 
 const stockText = (variant) =>
     variant.unit === 'meter' ? `${(variant.currentStock / 100).toFixed(2)} m` : String(variant.currentStock)
@@ -47,15 +48,19 @@ export default function LabelsPage() {
         return latest
     }, [])
     const addedOn = (variant) => addedAt?.get(variant.id) ?? variant.createdAt
+
+    // Label size, price and printer are set once in Settings.
+    const [prefs] = useState(() => loadLabelPrefs())
+    const [printer] = useState(() => loadPrinterSettings())
+    const headerRow = useLiveQuery(() => db.settings.get(HEADER_KEY), [])
+    const header = typeof headerRow?.value === 'string' ? headerRow.value : ''
+    const priceMode = prefs.priceMode
+
     // Coming from "Add stock", the new entries already have their copies filled in.
     const [copies, setCopies] = useState(() => readLabelPreset())
-    const [presetId, setPresetId] = useState(LABEL_PRESETS[0].id)
-    const [customWidth, setCustomWidth] = useState('50')
-    const [customHeight, setCustomHeight] = useState('25')
-    const [priceMode, setPriceMode] = useState('mrp')
     const [search, setSearch] = useState('')
-    const [header, setHeader] = useState('') // the name printed at the top of every label
-    const [printer, setPrinter] = useState(() => loadPrinterSettings())
+    const [addedFilter, setAddedFilter] = useState('all') // all | today | week
+    const [visibleCount, setVisibleCount] = useState(20)
     const [status, setStatus] = useState(null) // { type: 'ok' | 'error', text }
     const [busy, setBusy] = useState(false)
 
@@ -63,29 +68,9 @@ export default function LabelsPage() {
         clearLabelPreset()
     }, [])
 
-    // The name at the top is kept with the shop's settings, so it is there next time.
-    useEffect(() => {
-        let cancelled = false
-        db.settings
-            .get(HEADER_KEY)
-            .then((row) => {
-                if (!cancelled) setHeader(typeof row?.value === 'string' ? row.value : '')
-            })
-            .catch(() => { })
-        return () => {
-            cancelled = true
-        }
-    }, [])
-
-    function changeHeader(text) {
-        const value = text.slice(0, HEADER_MAX)
-        setHeader(value)
-        db.settings.put({ key: HEADER_KEY, value }).catch(() => { })
-    }
-
-    const preset = LABEL_PRESETS.find((p) => p.id === presetId)
-    const widthMm = preset ? preset.widthMm : Number(customWidth)
-    const heightMm = preset ? preset.heightMm : Number(customHeight)
+    const preset = LABEL_PRESETS.find((p) => p.id === (prefs.presetId || LABEL_PRESETS[0].id))
+    const widthMm = preset ? preset.widthMm : Number(prefs.customWidth)
+    const heightMm = preset ? preset.heightMm : Number(prefs.customHeight)
     const sizeError = validateLabelSize(widthMm, heightMm)
 
     const query = search.trim().toLowerCase()
@@ -95,15 +80,25 @@ export default function LabelsPage() {
         if (!/^\d+(\.\d{1,2})?$/.test(text)) return null
         return Math.round(Number(text) * 100)
     })()
-    const shown = (items ?? []).filter(
-        ({ variant, product }) =>
-            !query ||
-            product.name.toLowerCase().includes(query) ||
-            // short numbers are prices, so only long numbers are looked up inside the barcode
-            (query.length >= 6 && variant.barcode.toLowerCase().includes(query)) ||
-            (typedPaise !== null &&
-                (variant.mrpPaise === typedPaise || variant.sellingPricePaise === typedPaise)),
-    ).sort((a, b) => String(addedOn(b.variant)).localeCompare(String(addedOn(a.variant))))
+    const shown = (items ?? [])
+        .filter(({ variant }) => {
+            if (addedFilter === 'all') return true
+            const days = addedFilter === 'today' ? 1 : 7
+            const from = new Date()
+            from.setHours(0, 0, 0, 0)
+            from.setDate(from.getDate() - (days - 1))
+            return new Date(addedOn(variant)) >= from
+        })
+        .filter(
+            ({ variant, product }) =>
+                !query ||
+                product.name.toLowerCase().includes(query) ||
+                // short numbers are prices, so only long numbers are looked up inside the barcode
+                (query.length >= 6 && variant.barcode.toLowerCase().includes(query)) ||
+                (typedPaise !== null &&
+                    (variant.mrpPaise === typedPaise || variant.sellingPricePaise === typedPaise)),
+        )
+        .sort((a, b) => String(addedOn(b.variant)).localeCompare(String(addedOn(a.variant))))
 
     const labels = useMemo(
         () =>
@@ -142,16 +137,6 @@ export default function LabelsPage() {
         })
     }
 
-    function changePrinter(patch) {
-        setPrinter((current) => {
-            const next = { ...current, ...patch }
-            savePrinterSettings(next)
-            return next
-        })
-    }
-    const numberField = (key) => (e) =>
-        changePrinter({ [key]: e.target.value === '' ? 0 : Number(e.target.value) })
-
     // Direct printing: the label goes to the printer as a picture, with no print window.
     async function sendDirect(makeJob, doneText) {
         setBusy(true)
@@ -185,219 +170,22 @@ export default function LabelsPage() {
         )
     }
 
-    function handleTestPrint() {
-        return sendDirect(
-            () => buildTestPrintJob({ widthMm, heightMm, options: tsplOptions(printer) }),
-            'Test label sent to the printer',
-        )
-    }
-
-    async function handleCheck() {
-        setBusy(true)
-        setStatus(null)
-        try {
-            const info = await checkHelper(printer.helperUrl)
-            setStatus({
-                type: 'ok',
-                text: `Connected to the label helper. Printer: ${info?.printer ?? 'unknown'}`,
-            })
-        } catch (err) {
-            setStatus({ type: 'error', text: err?.message || 'Could not reach the label helper' })
-        } finally {
-            setBusy(false)
-        }
-    }
+    const priceName = { mrp: 'MRP', selling: 'Selling price', none: 'No price' }[priceMode]
 
     return (
         <div className="space-y-4">
             <div className="space-y-4 print:hidden">
                 <h2 className="text-xl font-bold">Barcode labels</h2>
 
-                <div className="space-y-3 rounded-xl bg-white p-4 shadow-sm">
-                    <FormField
-                        label="Label size"
-                        htmlFor="label-size"
-                        hint="Choose the size of the sticker on your roll."
-                    >
-                        <select
-                            id="label-size"
-                            className={inputClass}
-                            value={presetId}
-                            onChange={(e) => setPresetId(e.target.value)}
-                        >
-                            {LABEL_PRESETS.map((p) => (
-                                <option key={p.id} value={p.id}>
-                                    {p.label}
-                                </option>
-                            ))}
-                            <option value="custom">Custom size</option>
-                        </select>
-                    </FormField>
-
-                    {!preset && (
-                        <div className="grid grid-cols-2 gap-3">
-                            <FormField label="Width (mm)" htmlFor="label-width">
-                                <input
-                                    id="label-width"
-                                    inputMode="decimal"
-                                    className={inputClass}
-                                    value={customWidth}
-                                    onChange={(e) => setCustomWidth(e.target.value)}
-                                />
-                            </FormField>
-                            <FormField label="Height (mm)" htmlFor="label-height">
-                                <input
-                                    id="label-height"
-                                    inputMode="decimal"
-                                    className={inputClass}
-                                    value={customHeight}
-                                    onChange={(e) => setCustomHeight(e.target.value)}
-                                />
-                            </FormField>
-                        </div>
-                    )}
-                    {sizeError && <p className="text-sm text-red-600">{sizeError}</p>}
-
-                    <FormField label="Price on label" htmlFor="label-price-mode">
-                        <select
-                            id="label-price-mode"
-                            className={inputClass}
-                            value={priceMode}
-                            onChange={(e) => setPriceMode(e.target.value)}
-                        >
-                            <option value="mrp">MRP</option>
-                            <option value="selling">Selling price</option>
-                            <option value="none">No price</option>
-                        </select>
-                    </FormField>
-
-                    <FormField
-                        label="Name at the top of the label"
-                        htmlFor="label-header"
-                        hint="Printed at the top of every label, for example your shop name. Leave empty for none."
-                    >
-                        <input
-                            id="label-header"
-                            className={inputClass}
-                            maxLength={HEADER_MAX}
-                            autoComplete="off"
-                            value={header}
-                            onChange={(e) => changeHeader(e.target.value)}
-                            placeholder="SG Dhokate"
-                        />
-                    </FormField>
-                </div>
-
-                <details className="rounded-xl bg-white p-4 shadow-sm">
-                    <summary className="cursor-pointer font-semibold">
-                        Direct printing to the label printer {printer.direct ? '(on)' : '(off)'}
-                    </summary>
-                    <div className="mt-3 space-y-3">
-                        <p className="text-sm text-slate-600">
-                            Sends each label straight to the printer, with no print window and no paper size or
-                            orientation to choose. It needs the small label helper running on this computer.
-                        </p>
-                        <label className="flex items-center gap-2 text-sm font-medium">
-                            <input
-                                type="checkbox"
-                                checked={printer.direct}
-                                onChange={(e) => changePrinter({ direct: e.target.checked })}
-                            />
-                            Print directly to the label printer (no print window)
-                        </label>
-                        <FormField label="Label helper address" htmlFor="helper-url">
-                            <input
-                                id="helper-url"
-                                className={inputClass}
-                                value={printer.helperUrl}
-                                onChange={(e) => changePrinter({ helperUrl: e.target.value })}
-                            />
-                        </FormField>
-                        <FormField
-                            label="Printer name (optional)"
-                            htmlFor="helper-printer"
-                            hint="Leave empty to use the printer the helper was started with."
-                        >
-                            <input
-                                id="helper-printer"
-                                className={inputClass}
-                                value={printer.printerName}
-                                onChange={(e) => changePrinter({ printerName: e.target.value })}
-                                placeholder="TSC TTP-244 Pro"
-                            />
-                        </FormField>
-                        <div className="grid grid-cols-2 gap-3">
-                            <FormField label="Gap between labels (mm)" htmlFor="helper-gap">
-                                <input
-                                    id="helper-gap"
-                                    type="number"
-                                    min="0"
-                                    max="20"
-                                    step="0.5"
-                                    className={inputClass}
-                                    value={printer.gapMm}
-                                    onChange={numberField('gapMm')}
-                                />
-                            </FormField>
-                            <FormField label="Darkness (0-15)" htmlFor="helper-density">
-                                <input
-                                    id="helper-density"
-                                    type="number"
-                                    min="0"
-                                    max="15"
-                                    className={inputClass}
-                                    value={printer.density}
-                                    onChange={numberField('density')}
-                                />
-                            </FormField>
-                            <FormField label="Move print right (mm)" htmlFor="helper-x">
-                                <input
-                                    id="helper-x"
-                                    type="number"
-                                    min="0"
-                                    max="20"
-                                    step="0.5"
-                                    className={inputClass}
-                                    value={printer.offsetXmm}
-                                    onChange={numberField('offsetXmm')}
-                                />
-                            </FormField>
-                            <FormField label="Move print down (mm)" htmlFor="helper-y">
-                                <input
-                                    id="helper-y"
-                                    type="number"
-                                    min="0"
-                                    max="20"
-                                    step="0.5"
-                                    className={inputClass}
-                                    value={printer.offsetYmm}
-                                    onChange={numberField('offsetYmm')}
-                                />
-                            </FormField>
-                        </div>
-                        <label className="flex items-center gap-2 text-sm">
-                            <input
-                                type="checkbox"
-                                checked={printer.upsideDown}
-                                onChange={(e) => changePrinter({ upsideDown: e.target.checked })}
-                            />
-                            Turn the label upside-down (if the test label shows TOP at the bottom)
-                        </label>
-                        <div className="flex flex-wrap gap-2">
-                            <button type="button" className={secondaryButton} disabled={busy} onClick={handleCheck}>
-                                Test connection
-                            </button>
-                            <button
-                                type="button"
-                                className={secondaryButton}
-                                disabled={busy || Boolean(sizeError)}
-                                onClick={handleTestPrint}
-                            >
-                                Print test label
-                            </button>
-                        </div>
-                    </div>
-                </details>
+                <p className="rounded-lg bg-white p-3 text-sm text-slate-600 shadow-sm">
+                    Label {widthMm} × {heightMm} mm · {priceName}
+                    {header ? ` · "${header}" at the top` : ''} ·{' '}
+                    {printer.direct ? 'direct printing on' : 'browser printing'}.{' '}
+                    <Link to="/settings" className="font-medium text-blue-600 underline">
+                        Change in Settings
+                    </Link>
+                </p>
+                {sizeError && <p className="text-sm text-red-600">{sizeError}</p>}
 
                 <div className="space-y-3 rounded-xl bg-white p-4 shadow-sm">
                     <FormField label="Search items" htmlFor="label-search">
@@ -405,9 +193,27 @@ export default function LabelsPage() {
                             id="label-search"
                             className={inputClass}
                             value={search}
-                            onChange={(e) => setSearch(e.target.value)}
+                            onChange={(e) => {
+                                setSearch(e.target.value)
+                                setVisibleCount(20)
+                            }}
                             placeholder="Name, barcode or price (e.g. 299)"
                         />
+                    </FormField>
+                    <FormField label="Show items added" htmlFor="label-added">
+                        <select
+                            id="label-added"
+                            className={inputClass}
+                            value={addedFilter}
+                            onChange={(e) => {
+                                setAddedFilter(e.target.value)
+                                setVisibleCount(20)
+                            }}
+                        >
+                            <option value="all">All items</option>
+                            <option value="today">Added today</option>
+                            <option value="week">Added in the last 7 days</option>
+                        </select>
                     </FormField>
                     <div className="flex flex-wrap gap-2">
                         <button
@@ -436,7 +242,7 @@ export default function LabelsPage() {
                     )}
 
                     <ul className="space-y-2">
-                        {shown.map(({ variant, product }) => {
+                        {shown.slice(0, visibleCount).map(({ variant, product }) => {
                             const { warning } = chooseSymbology(variant.barcode)
                             return (
                                 <li
@@ -471,6 +277,27 @@ export default function LabelsPage() {
                             )
                         })}
                     </ul>
+                    {shown.length > visibleCount && (
+                        <div className="flex flex-wrap items-center gap-2">
+                            <button
+                                type="button"
+                                className={secondaryButton}
+                                onClick={() => setVisibleCount((n) => n + 20)}
+                            >
+                                Show 20 more
+                            </button>
+                            <button
+                                type="button"
+                                className={secondaryButton}
+                                onClick={() => setVisibleCount(shown.length)}
+                            >
+                                Show all
+                            </button>
+                            <span className="text-sm text-slate-500">
+                                Showing {Math.min(visibleCount, shown.length)} of {shown.length}
+                            </span>
+                        </div>
+                    )}
                 </div>
 
                 {status && (
@@ -483,7 +310,7 @@ export default function LabelsPage() {
                     </p>
                 )}
 
-                <div className="flex flex-wrap items-center gap-3">
+                <div className="sticky bottom-0 z-10 flex flex-wrap items-center gap-3 border-t border-slate-200 bg-white/95 p-3 backdrop-blur">
                     <button
                         type="button"
                         className={primaryButton}
@@ -502,13 +329,6 @@ export default function LabelsPage() {
                         {labels.length > MAX_LABELS && ` (showing the first ${MAX_LABELS})`}
                     </p>
                 </div>
-                {!printer.direct && (
-                    <p className="text-xs text-slate-500">
-                        Printing through the browser: each label prints on its own page of the label size. In the
-                        print window choose your label printer, the same paper size, margins &ldquo;None&rdquo; and
-                        scale 100%. Turn on direct printing above to skip all of that.
-                    </p>
-                )}
             </div>
 
             {!sizeError && (

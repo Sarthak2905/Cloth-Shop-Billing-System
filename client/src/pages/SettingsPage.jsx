@@ -6,6 +6,8 @@ import OwnerPinSettings from '../components/OwnerPinSettings'
 import { inputClass, primaryButton } from '../components/styles'
 import { fieldErrorsFrom } from '../lib/errors'
 import { SETTINGS_PRINTER_CHOICES } from '../printing/printerFactory'
+import LabelSettings from '../components/LabelSettings'
+
 
 const FIELDS = [
     'shopName',
@@ -175,6 +177,7 @@ export default function SettingsPage() {
                 <SettingsForm initial={settings} />
             )}
             <OwnerPinSettings />
+            <LabelSettings />
         </div>
     )
 }
