@@ -1,10 +1,11 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { vi } from 'vitest'
+import LabelSettings from '../components/LabelSettings'
 import { buildLabelPrintJob, buildTestPrintJob } from '../labels/printJob'
 import { savePrinterSettings } from '../labels/printerSettings'
 import { setLabelPreset } from '../lib/labelPreset'
 import { clearDb, makeItem } from '../test-utils/correctionFixtures'
-import LabelsPage from './LabelsPage'
+import { renderLabelsPage } from '../test-utils/renderLabelsPage'
 
 vi.mock('../labels/printJob', () => ({
     buildLabelPrintJob: vi.fn(async () => new Uint8Array([83, 73, 90, 69])),
@@ -31,7 +32,7 @@ afterEach(() => {
 })
 
 async function renderPage() {
-    render(<LabelsPage />)
+    renderLabelsPage()
     await screen.findByLabelText(/Copies of Astr/)
 }
 const printButton = () => screen.getByRole('button', { name: 'Print labels' })
@@ -87,9 +88,9 @@ test('a helper that is not running shows why, and the browser can still be used'
     expect(window.print).toHaveBeenCalledTimes(1)
 })
 
-test('the settings are saved and used in the next job', async () => {
+test('the settings made in Settings are saved and used in the next job', async () => {
     vi.stubGlobal('fetch', okReply({ ok: true }))
-    await renderPage()
+    render(<LabelSettings />)
 
     fireEvent.click(screen.getByLabelText('Print directly to the label printer (no print window)'))
     fireEvent.change(screen.getByLabelText('Gap between labels (mm)'), { target: { value: '2.5' } })
@@ -101,15 +102,17 @@ test('the settings are saved and used in the next job', async () => {
         upsideDown: true,
     })
 
+    cleanup()
+    await renderPage()
     fireEvent.click(printButton())
     await screen.findByText('Sent 2 labels to the printer')
     expect(buildLabelPrintJob.mock.calls[0][0].options).toMatchObject({ gapMm: 2.5, direction: 0 })
 })
 
-test('Test connection tells which printer the helper uses', async () => {
+test('Test connection (in Settings) tells which printer the helper uses', async () => {
     const fetchMock = okReply({ ok: true, printer: 'TSC TTP-244 Pro' })
     vi.stubGlobal('fetch', fetchMock)
-    await renderPage()
+    render(<LabelSettings />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Test connection' }))
 
@@ -119,10 +122,10 @@ test('Test connection tells which printer the helper uses', async () => {
     expect(fetchMock.mock.calls[0][0]).toBe('http://127.0.0.1:9101/health')
 })
 
-test('Print test label sends the test job', async () => {
+test('Print test label (in Settings) sends the test job', async () => {
     const fetchMock = okReply({ ok: true })
     vi.stubGlobal('fetch', fetchMock)
-    await renderPage()
+    render(<LabelSettings />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Print test label' }))
 

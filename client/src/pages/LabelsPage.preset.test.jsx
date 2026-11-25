@@ -1,8 +1,9 @@
+import { renderLabelsPage } from '../test-utils/renderLabelsPage'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { db } from '../db/db'
 import { addStockEntries } from '../db/stockEntryRepo'
 import { readLabelPreset, setLabelPreset } from '../lib/labelPreset'
-import LabelsPage from './LabelsPage'
+
 
 beforeEach(async () => {
     await Promise.all(db.tables.map((t) => t.clear()))
@@ -24,7 +25,7 @@ test('labels coming from the Add stock screen are already filled in', async () =
     const [m] = await twoEntries()
     setLabelPreset({ [m.id]: 3 })
 
-    render(<LabelsPage />)
+    renderLabelsPage()
 
     await waitFor(() => expect(screen.getByLabelText('Copies of Cotton Shirt size M')).toHaveValue(3))
     expect(screen.getByText('3 labels')).toBeInTheDocument()
@@ -33,7 +34,7 @@ test('labels coming from the Add stock screen are already filled in', async () =
 
 test('"Copies = stock" fills one label for each piece in stock, up to 99', async () => {
     await twoEntries()
-    render(<LabelsPage />)
+    renderLabelsPage()
 
     // wait until the items have loaded, so the button is enabled
     await screen.findByLabelText('Copies of Cotton Shirt size M')

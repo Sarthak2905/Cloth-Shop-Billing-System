@@ -7,6 +7,7 @@ import { buildTestPrintJob } from '../labels/printJob'
 import { loadPrinterSettings, savePrinterSettings, tsplOptions } from '../labels/printerSettings'
 import FormField from './FormField'
 import { inputClass, secondaryButton } from './styles'
+import { buildCalibrateJob } from '../labels/calibrate'
 
 const HEADER_KEY = 'labelHeader'
 const HEADER_MAX = 30
@@ -87,6 +88,16 @@ export default function LabelSettings() {
                 await sendToHelper(printer.helperUrl, bytes, { printerName: printer.printerName })
             },
             () => 'Test label sent to the printer',
+        )
+    const handleCalibrate = () =>
+        run(
+            () =>
+                sendToHelper(
+                    printer.helperUrl,
+                    buildCalibrateJob({ widthMm, heightMm, gapMm: printer.gapMm }),
+                    { printerName: printer.printerName },
+                ),
+            () => 'Calibration sent. The printer feeds a few stickers and stops.',
         )
 
     return (
@@ -271,6 +282,14 @@ export default function LabelSettings() {
                             onClick={handleTestPrint}
                         >
                             Print test label
+                        </button>
+                                                <button
+                            type="button"
+                            className={secondaryButton}
+                            disabled={busy || Boolean(sizeError)}
+                            onClick={handleCalibrate}
+                        >
+                            Calibrate label sensor
                         </button>
                     </div>
                 </div>

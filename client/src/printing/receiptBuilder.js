@@ -30,6 +30,7 @@ export const LABELS = {
     includesTax: 'Includes tax',
     duplicate: '*** DUPLICATE COPY ***',
     phone: 'Ph',
+    customer: 'Customer',
     gst: 'GST',
     taxId: 'GSTIN',
     thanks: 'Thank you! Visit again.',
@@ -54,6 +55,7 @@ export const LABELS = {
     includesTax: 'एकूणात कर',
     duplicate: '*** दुय्यम प्रत ***',
     phone: 'फोन',
+    customer: 'ग्राहक',
     gst: 'जीएसटी',
     taxId: 'GSTIN',
     thanks: 'धन्यवाद! पुन्हा भेट द्या.',
@@ -94,6 +96,10 @@ export function buildReceipt(
   }
   lines.push(...twoColumns(`${t.invoice}:`, sale.invoiceNumber, width))
   lines.push(...twoColumns(`${t.date}:`, formatDateTime(sale.createdAt), width))
+    if (sale.customerName)
+      lines.push(...twoColumns(`${t.customer}:`, sale.customerName, width))
+    if (sale.customerPhone)
+      lines.push(...twoColumns(`${t.phone}:`, sale.customerPhone, width))
   lines.push(divider(width))
 
   // Items

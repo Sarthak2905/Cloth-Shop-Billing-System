@@ -1,11 +1,12 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { vi } from 'vitest'
+import LabelSettings from '../components/LabelSettings'
 import { db } from '../db/db'
 import { buildLabelPrintJob } from '../labels/printJob'
 import { savePrinterSettings } from '../labels/printerSettings'
 import { setLabelPreset } from '../lib/labelPreset'
 import { clearDb, makeItem } from '../test-utils/correctionFixtures'
-import LabelsPage from './LabelsPage'
+import { renderLabelsPage } from '../test-utils/renderLabelsPage'
 
 vi.mock('../labels/printJob', () => ({
     buildLabelPrintJob: vi.fn(async () => new Uint8Array([83, 73, 90, 69])),
@@ -29,49 +30,60 @@ afterEach(() => {
 })
 
 async function renderPage() {
-    render(<LabelsPage />)
+    renderLabelsPage()
     await screen.findByLabelText(/Copies of Astr/)
-    return screen.getByLabelText('Name at the top of the label')
 }
+const settingsBox = () => screen.getByLabelText('Name at the top of the label')
 
-test('the name typed is saved, and is shown on the top of every label', async () => {
-    const box = await renderPage()
-    expect(screen.queryAllByTestId('label-header')).toHaveLength(0)
+test('the name typed in Settings is saved', async () => {
+    render(<LabelSettings />)
 
-    fireEvent.change(box, { target: { value: 'SG Dhokate' } })
+    fireEvent.change(settingsBox(), { target: { value: 'SG Dhokate' } })
 
     await waitFor(async () => expect((await db.settings.get('labelHeader')).value).toBe('SG Dhokate'))
-    expect(screen.getAllByTestId('label-header')).toHaveLength(2) // one for each copy
-    expect(screen.getAllByTestId('label-header')[0]).toHaveTextContent('SG Dhokate')
 })
 
-test('the saved name comes back when the page is opened again', async () => {
+test('the saved name comes back when Settings is opened again', async () => {
     await db.settings.put({ key: 'labelHeader', value: 'SG Dhokate' })
 
-    const box = await renderPage()
+    render(<LabelSettings />)
 
-    await waitFor(() => expect(box).toHaveValue('SG Dhokate'))
+    await waitFor(() => expect(settingsBox()).toHaveValue('SG Dhokate'))
 })
 
 test('the name is cut at 30 characters', async () => {
-    const box = await renderPage()
+    render(<LabelSettings />)
 
-    fireEvent.change(box, { target: { value: 'X'.repeat(45) } })
+    fireEvent.change(settingsBox(), { target: { value: 'X'.repeat(45) } })
 
-    await waitFor(() => expect(box).toHaveValue('X'.repeat(30)))
+    await waitFor(() => expect(settingsBox()).toHaveValue('X'.repeat(30)))
     await waitFor(async () => expect((await db.settings.get('labelHeader')).value).toBe('X'.repeat(30)))
 })
 
-test('clearing the box removes the name from the labels', async () => {
+test('clearing the box removes the saved name', async () => {
     await db.settings.put({ key: 'labelHeader', value: 'SG Dhokate' })
-    const box = await renderPage()
-    await waitFor(() => expect(box).toHaveValue('SG Dhokate'))
-    expect(screen.getAllByTestId('label-header')).toHaveLength(2)
+    render(<LabelSettings />)
+    await waitFor(() => expect(settingsBox()).toHaveValue('SG Dhokate'))
 
-    fireEvent.change(box, { target: { value: '' } })
+    fireEvent.change(settingsBox(), { target: { value: '' } })
 
-    await waitFor(() => expect(screen.queryAllByTestId('label-header')).toHaveLength(0))
-    expect((await db.settings.get('labelHeader')).value).toBe('')
+    await waitFor(async () => expect((await db.settings.get('labelHeader')).value).toBe(''))
+})
+
+test('the saved name is shown on the top of every label on the Labels page', async () => {
+    await db.settings.put({ key: 'labelHeader', value: 'SG Dhokate' })
+
+    await renderPage()
+
+    const headers = await screen.findAllByTestId('label-header')
+    expect(headers).toHaveLength(2) // one for each copy
+    expect(headers[0]).toHaveTextContent('SG Dhokate')
+})
+
+test('without a name the labels show none', async () => {
+    await renderPage()
+
+    expect(screen.queryAllByTestId('label-header')).toHaveLength(0)
 })
 
 test('direct printing sends the name with each label', async () => {
@@ -81,8 +93,8 @@ test('direct printing sends the name with each label', async () => {
         'fetch',
         vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ ok: true }) })),
     )
-    const box = await renderPage()
-    await waitFor(() => expect(box).toHaveValue('SG Dhokate'))
+    await renderPage()
+    await screen.findAllByTestId('label-header') // the name has been loaded
 
     fireEvent.click(screen.getByRole('button', { name: 'Print labels' }))
 
@@ -92,7 +104,7 @@ test('direct printing sends the name with each label', async () => {
     expect(entries[0]).toMatchObject({ copies: 2, label: { title: 'Astr', header: 'SG Dhokate' } })
 })
 
-test('without a name the labels have none', async () => {
+test('direct printing without a name sends no name', async () => {
     savePrinterSettings({ direct: true })
     vi.stubGlobal(
         'fetch',

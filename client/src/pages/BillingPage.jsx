@@ -10,6 +10,9 @@ import { countPendingPayments } from '../db/paymentRepo'
 import { lookupBarcode } from '../scanner/scanService'
 import { useBarcodeScanner } from '../scanner/useBarcodeScanner'
 import { simulateKeyboardScan } from '../scanner/simulateScan'
+import CustomerBox from '../components/CustomerBox'
+import { checkPhone } from '../lib/customer'
+import { useFieldScanner } from '../scanner/useFieldScanner'
 import {
     addItem,
     createCart,
@@ -126,6 +129,7 @@ export default function BillingPage() {
     const [cameraOn, setCameraOn] = useState(false)
     const [payForm, setPayForm] = useState(EMPTY_PAYMENT_FORM)
     const [payError, setPayError] = useState('')
+    const [customer, setCustomer] = useState({ name: '', phone: '' })
     const [saving, setSaving] = useState(false)
     const inputRef = useRef(null)
     const listRef = useRef(null)
@@ -167,6 +171,7 @@ export default function BillingPage() {
                 setCart(start)
                 setCompleted(null)
                 setNotice(null)
+                setCustomer({ name: '', phone: '' })
                 setCorrection({ sale, reason: authReason })
             })
             .catch((err) => {
@@ -234,8 +239,16 @@ export default function BillingPage() {
         else setNotice({ type: 'error', text: result.message })
     }
 
-    // Keyboard-style hardware scanners (when no text box has focus).
-    useBarcodeScanner({ onScan: handleCode })
+    
+    useBarcodeScanner({ onScan: handleCode, maxGapMs: 120 })
+    // A scan while the cursor is in another box (customer, search, payment) still adds the item,
+    // and the cursor goes back to the barcode box.
+    useFieldScanner({
+        onScan: (scanned) => {
+            handleCode(scanned)
+            inputRef.current?.focus({ preventScroll: true })
+        },
+    })
 
     function handleSubmit(e) {
         e.preventDefault()
@@ -304,6 +317,7 @@ export default function BillingPage() {
         setPrintMsg(null)
         setShowRecord(false)
         setPayForm(EMPTY_PAYMENT_FORM)
+        setCustomer({ name: '', phone: '' })
         inputRef.current?.focus({ preventScroll: true })
     }
 
@@ -311,6 +325,13 @@ export default function BillingPage() {
     // then prints it.
     async function handleSave(print = true) {
         if (saving || cartRef.current.lines.length === 0) return
+
+        const phoneCheck = checkPhone(customer.phone)
+        if (phoneCheck.error) {
+            setPayError(phoneCheck.error)
+            return
+        }
+        
         const { payments, error } = paymentsFromForm(payForm)
         if (error) {
             setPayError(error)
@@ -330,6 +351,7 @@ export default function BillingPage() {
                 id: saleIdRef.current,
                 cart: cartRef.current,
                 payments,
+                customer,
             })
             afterSave(sale)
             if (print) await printSale(sale.id)
@@ -418,6 +440,8 @@ export default function BillingPage() {
                                 value={code}
                                 onChange={(e) => setCode(e.target.value)}
                                 placeholder="Scan or type a barcode, then press Enter"
+                                data-scan-self
+                                onFocus={(e) => e.target.select()}
                             />
                         </div>
                         <button type="submit" className={primaryButton}>
@@ -634,6 +658,7 @@ export default function BillingPage() {
                     />
                 ) : (
                     <PayBox
+                    
                         form={payForm}
                         onForm={(next) => {
                             setPayForm(next)
@@ -646,6 +671,7 @@ export default function BillingPage() {
                         onSave={handleSave}
                     />
                 )}
+                {!correction && <CustomerBox value={customer} onChange={setCustomer} />}
 
                 {!correction && cart.lines.length > 0 && (
                     <button type="button" className={secondaryButton} onClick={handleClearBill}>

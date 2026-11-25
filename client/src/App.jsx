@@ -13,6 +13,9 @@ import BackupPage from './pages/BackupPage'
 import StoragePage from './pages/StoragePage'
 import ScannerTestPage from './pages/ScannerTestPage'
 import ImportPage from './pages/ImportPage'
+import CustomersPage from './pages/CustomersPage'
+import CustomerDetailPage from './pages/CustomerDetailPage'
+
 
 export default function App() {
   return (
@@ -22,6 +25,8 @@ export default function App() {
         <Route path="/billing" element={<BillingPage />} />
         <Route path="/sales" element={<SalesPage />} />
         <Route path="/sales/:id" element={<SaleDetailPage />} />
+        <Route path="/customers" element={<CustomersPage />} />
+        <Route path="/customers/:key" element={<CustomerDetailPage />} />
         <Route path="/products" element={<ProductsPage />} />
         <Route path="/stock/new" element={<AddStockPage />} />
         <Route path="/products/new" element={<AddStockPage />} />

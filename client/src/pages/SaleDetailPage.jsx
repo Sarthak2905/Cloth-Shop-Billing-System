@@ -16,6 +16,7 @@ import { formatDateTime } from '../lib/format'
 import { formatINR } from '../lib/money'
 import { paymentBreakdown, paymentInfo, paymentText } from '../lib/payments'
 import { formatQuantity } from '../lib/quantity'
+import { customerKey } from '../lib/customer'
 
 const CONFIRMATION_TEXT = {
     simulated: 'simulated only, nothing was physically printed',
@@ -130,6 +131,15 @@ export default function SaleDetailPage() {
                 <p className="text-sm text-slate-500">{formatDateTime(sale.createdAt)}</p>
                 <p className="text-sm text-slate-500">{sale.shop.name}</p>
             </div>
+            {customerKey(sale) && (
+                <div className="rounded-xl bg-white p-4 text-sm shadow-sm">
+                    <p className="font-semibold">Customer</p>
+                    <p>{[sale.customerName, sale.customerPhone].filter(Boolean).join(' · ')}</p>
+                    <Link to={`/customers/${encodeURIComponent(customerKey(sale))}`} className="text-blue-600 underline">
+                        See all bills and items bought
+                    </Link>
+                </div>
+            )}
 
             {sale.status === 'cancelled' && (
                 <div

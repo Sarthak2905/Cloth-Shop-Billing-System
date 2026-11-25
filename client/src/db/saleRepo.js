@@ -1,3 +1,4 @@
+import { normalizeCustomer } from '../lib/customer.js'
 import { z } from 'zod'
 import { db } from './db.js'
 import { getSettings } from './settingsRepo.js'
@@ -23,7 +24,7 @@ const paymentSchema = z.object({
 //   payment:  { method, amountTenderedPaise }       one method for the whole bill; cash
 //             must cover the total
 //   neither:  the bill is saved as "payment pending" and paid later
-export async function createSale({ id, cart, payment, payments }) {
+export async function createSale({ id, cart, payment, payments, customer }) {
   if (typeof id !== 'string' || !id) {
     throw new AppError('VALIDATION_ERROR', 'A sale id is required')
   }
@@ -32,6 +33,7 @@ export async function createSale({ id, cart, payment, payments }) {
       ? validate(paymentSchema, payment)
       : null
 
+  const buyer = normalizeCustomer(customer) // a wrong phone number stops the save
   if (!cart?.lines?.length)
     throw new AppError('EMPTY_BILL', 'The bill is empty')
   for (const line of cart.lines) {
@@ -148,6 +150,8 @@ export async function createSale({ id, cart, payment, payments }) {
         receivedPaise: paid.receivedPaise,
         shortPaise: paid.shortPaise,
         paymentRecordedAt: paid.status === 'paid' ? createdAt : null,
+        ...(buyer.name ? { customerName: buyer.name } : {}),
+        ...(buyer.phone ? { customerPhone: buyer.phone } : {}),
       }
       await db.sales.add(sale)
 
@@ -198,7 +202,7 @@ export async function createSale({ id, cart, payment, payments }) {
     },
   )
 }
-
+  
 export async function getSale(id) {
   const sale = await db.sales.get(id)
   if (!sale) return null

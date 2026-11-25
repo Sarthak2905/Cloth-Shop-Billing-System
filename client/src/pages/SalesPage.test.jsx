@@ -33,7 +33,9 @@ test('the sales page lists saved sales with invoice number, total and how it was
     )
 
     expect(await screen.findByText(sale.invoiceNumber)).toBeInTheDocument()
-    expect(screen.getByText('₹399.00')).toBeInTheDocument()
+    // the total shows twice: in the bill row and in the summary line above the list
+    expect(screen.getAllByText('₹399.00')).toHaveLength(2)
+    expect(screen.getByTestId('sales-summary')).toHaveTextContent('1 bill · Total ₹399.00')
     expect(screen.getByText(/1 items.*Cash/)).toBeInTheDocument()
 })
 

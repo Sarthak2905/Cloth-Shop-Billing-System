@@ -76,6 +76,8 @@ export function buildReceiptDocument(
   if (sale.replacesInvoice) center(`${x.replaces}: ${sale.replacesInvoice}`)
   row(`${t.invoice}:`, sale.invoiceNumber)
   row(`${t.date}:`, formatDateTime(sale.createdAt))
+    if (sale.customerName) row(`${t.customer}:`, sale.customerName)
+    if (sale.customerPhone) row(`${t.phone}:`, sale.customerPhone)
   divider()
 
   // Items

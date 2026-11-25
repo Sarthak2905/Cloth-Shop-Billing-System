@@ -1,9 +1,19 @@
-import { render, waitFor } from '@testing-library/react'
+import { act, render, waitFor } from '@testing-library/react'
 import { vi } from 'vitest'
 import { db } from '../db/db'
 import { fakeServer, product } from '../test-utils/pullFixtures'
 import { saveSession } from './session'
 import SyncProvider from './SyncProvider'
+import { cleanup } from '@testing-library/react'
+
+afterEach(async () => {
+    cleanup()   // unmount SyncProvider, which stops the old sync loop
+    await new Promise((resolve) => setTimeout(resolve, 150))   // let any pull already in flight finish
+})
+
+beforeEach(() => {
+    vi.clearAllMocks()   // forget calls left over from the previous test
+})
 
 function makeApi() {
     const server = fakeServer({ products: [product('p1')], variants: [], movements: [], sales: [] })

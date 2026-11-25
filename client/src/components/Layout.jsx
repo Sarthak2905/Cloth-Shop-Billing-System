@@ -14,6 +14,7 @@ const linkClass = ({ isActive }) =>
 const LINKS = [
     ['/billing', 'Billing'],
     ['/sales', 'Sales'],
+    ['/customers', 'Customers'],
     ['/products', 'Products'],
     ['/labels', 'Labels'],
     ['/settings', 'Settings'],
