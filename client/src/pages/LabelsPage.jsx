@@ -1,5 +1,5 @@
+import { formatINR } from '../lib/money'
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { listSellableVariants } from '../db/catalogRepo'
 import { db } from '../db/db'
@@ -170,51 +170,45 @@ export default function LabelsPage() {
         )
     }
 
-    const priceName = { mrp: 'MRP', selling: 'Selling price', none: 'No price' }[priceMode]
 
     return (
         <div className="space-y-4">
             <div className="space-y-4 print:hidden">
                 <h2 className="text-xl font-bold">Barcode labels</h2>
 
-                <p className="rounded-lg bg-white p-3 text-sm text-slate-600 shadow-sm">
-                    Label {widthMm} × {heightMm} mm · {priceName}
-                    {header ? ` · "${header}" at the top` : ''} ·{' '}
-                    {printer.direct ? 'direct printing on' : 'browser printing'}.{' '}
-                    <Link to="/settings" className="font-medium text-blue-600 underline">
-                        Change in Settings
-                    </Link>
-                </p>
+                
                 {sizeError && <p className="text-sm text-red-600">{sizeError}</p>}
 
                 <div className="space-y-3 rounded-xl bg-white p-4 shadow-sm">
-                    <FormField label="Search items" htmlFor="label-search">
-                        <input
-                            id="label-search"
-                            className={inputClass}
-                            value={search}
-                            onChange={(e) => {
-                                setSearch(e.target.value)
-                                setVisibleCount(20)
-                            }}
-                            placeholder="Name, barcode or price (e.g. 299)"
-                        />
-                    </FormField>
-                    <FormField label="Show items added" htmlFor="label-added">
-                        <select
-                            id="label-added"
-                            className={inputClass}
-                            value={addedFilter}
-                            onChange={(e) => {
-                                setAddedFilter(e.target.value)
-                                setVisibleCount(20)
-                            }}
-                        >
-                            <option value="all">All items</option>
-                            <option value="today">Added today</option>
-                            <option value="week">Added in the last 7 days</option>
-                        </select>
-                    </FormField>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                        <FormField label="Search items" htmlFor="label-search">
+                            <input
+                                id="label-search"
+                                className={inputClass}
+                                value={search}
+                                onChange={(e) => {
+                                    setSearch(e.target.value)
+                                    setVisibleCount(20)
+                                }}
+                                placeholder="Name, barcode or price (e.g. 299)"
+                            />
+                        </FormField>
+                        <FormField label="Show items added" htmlFor="label-added">
+                            <select
+                                id="label-added"
+                                className={inputClass}
+                                value={addedFilter}
+                                onChange={(e) => {
+                                    setAddedFilter(e.target.value)
+                                    setVisibleCount(20)
+                                }}
+                            >
+                                <option value="all">All items</option>
+                                <option value="today">Added today</option>
+                                <option value="week">Added in the last 7 days</option>
+                            </select>
+                        </FormField>
+                    </div>
                     <div className="flex flex-wrap gap-2">
                         <button
                             type="button"
@@ -241,63 +235,73 @@ export default function LabelsPage() {
                         <p className="text-sm text-slate-500">No products yet. Add stock first.</p>
                     )}
 
-                    <ul className="space-y-2">
-                        {shown.slice(0, visibleCount).map(({ variant, product }) => {
-                            const { warning } = chooseSymbology(variant.barcode)
-                            return (
-                                <li
-                                    key={variant.id}
-                                    className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 p-3"
-                                >
-                                    <div>
-                                        <p className="font-medium">
-                                            {product.name}
-                                            {variant.size ? ` · Size ${variant.size}` : ''}
-                                        </p>
-                                        <p className="text-xs text-slate-500">
-                                            {variant.barcode} · Stock {stockText(variant)}
-                                        </p>
-                                        {addedOn(variant) && (
-                                            <p className="text-xs text-slate-500">
-                                                Added {formatDateTime(addedOn(variant))}
+                    {/* Only this box scrolls while the cursor is over it. Outside it, the page scrolls. */}
+                    <div
+                        data-testid="label-list-box"
+                        className="h-[45vh] min-h-64 overflow-y-auto overscroll-contain rounded-lg border border-slate-200 bg-slate-50 p-2"
+                    >
+                        <ul className="space-y-2">
+                            {shown.slice(0, visibleCount).map(({ variant, product }) => {
+                                const { warning } = chooseSymbology(variant.barcode)
+                                return (
+                                    <li
+                                        key={variant.id}
+                                        className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white p-3"
+                                    >
+                                        <div>
+                                            <p className="font-medium">
+                                                {product.name}
+                                                {variant.size ? ` · Size ${variant.size}` : ''}
                                             </p>
-                                        )}
-                                        {warning && <p className="text-xs text-amber-700">{warning}</p>}
-                                    </div>
-                                    <input
-                                        type="number"
-                                        min="0"
-                                        max="99"
-                                        aria-label={`Copies of ${product.name} size ${variant.size}`}
-                                        className="w-20 rounded-lg border border-slate-300 px-2 py-2"
-                                        value={copies[variant.id] ?? 0}
-                                        onChange={(e) => setCopiesFor(variant.id, e.target.value)}
-                                    />
-                                </li>
-                            )
-                        })}
-                    </ul>
-                    {shown.length > visibleCount && (
-                        <div className="flex flex-wrap items-center gap-2">
-                            <button
-                                type="button"
-                                className={secondaryButton}
-                                onClick={() => setVisibleCount((n) => n + 20)}
-                            >
-                                Show 20 more
-                            </button>
-                            <button
-                                type="button"
-                                className={secondaryButton}
-                                onClick={() => setVisibleCount(shown.length)}
-                            >
-                                Show all
-                            </button>
-                            <span className="text-sm text-slate-500">
-                                Showing {Math.min(visibleCount, shown.length)} of {shown.length}
-                            </span>
-                        </div>
-                    )}
+                                            <p className="text-xs text-slate-500">
+                                                {variant.barcode} · Stock {stockText(variant)}
+                                            </p>
+                                            <p className="text-xs font-medium text-slate-700">
+                                                MRP {formatINR(variant.mrpPaise)} · Price {formatINR(variant.sellingPricePaise)}
+                                                {variant.unit === 'meter' ? ' / m' : ''}
+                                            </p>
+                                            {addedOn(variant) && (
+                                                <p className="text-xs text-slate-500">
+                                                    Added {formatDateTime(addedOn(variant))}
+                                                </p>
+                                            )}
+                                            {warning && <p className="text-xs text-amber-700">{warning}</p>}
+                                        </div>
+                                        <input
+                                            type="number"
+                                            min="0"
+                                            max="99"
+                                            aria-label={`Copies of ${product.name} size ${variant.size}`}
+                                            className="w-20 rounded-lg border border-slate-300 px-2 py-2"
+                                            value={copies[variant.id] ?? 0}
+                                            onChange={(e) => setCopiesFor(variant.id, e.target.value)}
+                                        />
+                                    </li>
+                                )
+                            })}
+                        </ul>
+                        {shown.length > visibleCount && (
+                            <div className="flex flex-wrap items-center gap-2 pt-3">
+                                <button
+                                    type="button"
+                                    className={secondaryButton}
+                                    onClick={() => setVisibleCount((n) => n + 20)}
+                                >
+                                    Show 20 more
+                                </button>
+                                <button
+                                    type="button"
+                                    className={secondaryButton}
+                                    onClick={() => setVisibleCount(shown.length)}
+                                >
+                                    Show all
+                                </button>
+                                <span className="text-sm text-slate-500">
+                                    Showing {Math.min(visibleCount, shown.length)} of {shown.length}
+                                </span>
+                            </div>
+                        )}
+                    </div>
                 </div>
 
                 {status && (

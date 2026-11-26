@@ -618,6 +618,8 @@ export default function BillingPage() {
                     </Link>
                 )}
 
+                {!correction && <CustomerBox value={customer} onChange={setCustomer} />}
+
                 <TotalsCard totals={totals} />
 
                 <div className="space-y-2 rounded-xl bg-white p-3 shadow-sm">
@@ -671,7 +673,6 @@ export default function BillingPage() {
                         onSave={handleSave}
                     />
                 )}
-                {!correction && <CustomerBox value={customer} onChange={setCustomer} />}
 
                 {!correction && cart.lines.length > 0 && (
                     <button type="button" className={secondaryButton} onClick={handleClearBill}>
