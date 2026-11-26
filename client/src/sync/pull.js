@@ -128,6 +128,8 @@ export function toLocalSale(s, syncedAt) {
     replacedByInvoice: s.replacedByInvoice ?? '',
     replacesSaleId: s.replacesSaleId ?? null,
     replacesInvoice: s.replacesInvoice ?? '',
+    ...(s.customerName ? { customerName: s.customerName } : {}),
+    ...(s.customerPhone ? { customerPhone: s.customerPhone } : {}),
   }
 }
 
@@ -279,7 +281,17 @@ async function applySales(items) {
         )
         continue
       }
-      await db.sales.put(toLocalSale(raw, syncedAt))
+            const incoming = toLocalSale(raw, syncedAt)
+            // a copy from the server may not carry the customer: keep the one saved on this device
+            if (existing) {
+              if (!incoming.customerName && existing.customerName) {
+                incoming.customerName = existing.customerName
+              }
+              if (!incoming.customerPhone && existing.customerPhone) {
+                incoming.customerPhone = existing.customerPhone
+              }
+            }
+            await db.sales.put(incoming)
       await db.saleItems.where('saleId').equals(raw.id).delete()
       await db.saleItems.bulkAdd(toLocalSaleItems(raw))
 

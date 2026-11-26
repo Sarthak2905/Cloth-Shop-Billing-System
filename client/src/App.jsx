@@ -15,6 +15,7 @@ import ScannerTestPage from './pages/ScannerTestPage'
 import ImportPage from './pages/ImportPage'
 import CustomersPage from './pages/CustomersPage'
 import CustomerDetailPage from './pages/CustomerDetailPage'
+import AdminAreaPage from './pages/AdminAreaPage'
 
 
 export default function App() {
@@ -27,6 +28,7 @@ export default function App() {
         <Route path="/sales/:id" element={<SaleDetailPage />} />
         <Route path="/customers" element={<CustomersPage />} />
         <Route path="/customers/:key" element={<CustomerDetailPage />} />
+        <Route path="/owner" element={<AdminAreaPage />} />
         <Route path="/products" element={<ProductsPage />} />
         <Route path="/stock/new" element={<AddStockPage />} />
         <Route path="/products/new" element={<AddStockPage />} />

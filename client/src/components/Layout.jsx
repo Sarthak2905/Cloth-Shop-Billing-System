@@ -43,6 +43,17 @@ function LayoutBody() {
                         ))}
                     </nav>
                     <div className="ml-auto flex shrink-0 items-center gap-2 md:ml-0">
+                        <NavLink
+                            to="/owner"
+                            className={({ isActive }) =>
+                                `rounded-lg border px-3 py-1.5 text-sm font-medium ${isActive
+                                    ? 'border-blue-600 bg-blue-600 text-white'
+                                    : 'border-slate-300 text-slate-700 hover:bg-slate-100'
+                                }`
+                            }
+                        >
+                            Admin
+                        </NavLink>
                         <OnlinePill />
                         <SyncBadge />
                         <ThemeToggle />

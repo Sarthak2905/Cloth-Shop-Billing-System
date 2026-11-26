@@ -12,6 +12,7 @@ import { settingsRouter } from "./routes/settings.js";
 import { syncRouter } from "./routes/sync.js";
 import { usersRouter } from "./routes/users.js";
 import { variantsRouter } from "./routes/variants.js";
+import { ownerRouter } from "./routes/owner.js";
 
 // Builds the Express app from a config object. It does not start a server or
 // connect to a database, so tests can create as many as they like.
@@ -49,6 +50,7 @@ export function createApp(config) {
   app.use("/api/products", productsRouter(config));
   app.use("/api/variants", variantsRouter(config));
   app.use("/api/sales", salesRouter(config));
+    app.use("/api/owner", ownerRouter(config));
   app.use("/api/sync", syncRouter(config));
 
   app.use(notFoundHandler);
