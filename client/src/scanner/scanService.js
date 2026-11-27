@@ -12,6 +12,19 @@ export function normalizeBarcode(raw) {
     .trim()
 }
 
+// Looks the barcode up as scanned first, then in capitals, then in small letters.
+// A scanner can send "clo000425" when Caps Lock is off, but the item is stored as "CLO000425".
+async function findVariant(barcode) {
+  const tries = [
+    ...new Set([barcode, barcode.toUpperCase(), barcode.toLowerCase()]),
+  ]
+  for (const code of tries) {
+    const variant = await getVariantByBarcode(code)
+    if (variant) return variant
+  }
+  return null
+}
+
 // Turns raw scanner/keyboard input into a clear result:
 //   found | not_found | invalid | archived
 // It never throws for bad input; it returns a result the UI can show.
@@ -33,7 +46,7 @@ export async function lookupBarcode(raw) {
     }
   }
 
-  const variant = await getVariantByBarcode(barcode)
+  const variant = await findVariant(barcode)
   if (!variant) {
     return {
       status: 'not_found',
@@ -53,5 +66,5 @@ export async function lookupBarcode(raw) {
     }
   }
 
-  return { status: 'found', barcode, variant, product }
+  return { status: 'found', barcode: variant.barcode, variant, product }
 }
